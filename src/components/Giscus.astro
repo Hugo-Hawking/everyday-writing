@@ -1,0 +1,39 @@
+---
+// giscus 评论区容器（mapping=specific：Discussion 标题 = data-term = 该文 frontmatter slug）。
+// 铁律（2026-10-02 修订）：frontmatter slug = 站点 URL 段 /posts/<slug>/ = giscus data-term = Discussion 标题。
+// 用 specific 而非 pathname：pathname 的 term = window.location.pathname 去前导斜杠，本站因 base=/everyday-writing/
+//   实得 `everyday-writing/posts/<slug>/`（含 base 前缀、随尾斜杠），与设计不符；specific 由前端显式给定 term，与 base/尾斜杠解耦。
+// ref: reference/knowledge/github_platform/2026-10-02_平台接口实测.md §0/§2.2（pathname term 含 base 前缀；specific → term = data-term 原样值）
+// ref: reference/plans/2026-10-02_phase1_端到端闭环/plan.md 顶部「变更：giscus 匹配策略 pathname → specific」
+// ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §2（Giscus.astro）
+// data-strict="0" 依据（实测 §2.5 源码实证）：strict=1 并非「标题精确匹配」，而是改用 sha1(term) 在 Discussion **body** 里搜
+//   （in:body），须 bot 建库时把 sha1(term) 写进 body 才生效。本项目对齐铁律是「标题 = slug」（bot 只写 title=slug、不写 sha1），
+//   故 strict=1 会找不到库（giscus 甚至另建重复库）；保持默认 strict=0（按标题搜索），容错由步骤 5 bot 搜后校验 nodes[0].title===term 兜住（实测 §6 待确认 2）。
+// ⚠️ TODO：repoId / category / categoryId 为占位符——仓库与 Discussions 尚未创建（人类前置清单 1–3 未完成）。
+//    回填来源：仓库创建并开启 Discussions 后，用 `gh api graphql` 查
+//      repository(owner,name){ id }  → data-repo-id
+//      repository.discussionCategories(first:10){ nodes{ id name } } → data-category / data-category-id
+//    （见 plan.md §3 步骤0 / code_structure.md §3「分类 id」；gh CLI 本机当前未安装，见 implementation_notes）
+interface Props {
+  term: string; // = 该文 frontmatter slug（Discussion 标题）
+}
+const { term } = Astro.props;
+const REPO = 'Hugo-Hawking/everyday-writing';
+---
+<script
+  src="https://giscus.app/client.js"
+  data-repo={REPO}
+  data-repo-id="TODO_REPO_ID"
+  data-category="TODO_CATEGORY_NAME"
+  data-category-id="TODO_CATEGORY_ID"
+  data-mapping="specific"
+  data-term={term}
+  data-strict="0"
+  data-reactions-enabled="1"
+  data-emit-metadata="0"
+  data-input-position="bottom"
+  data-theme="preferred_color_scheme"
+  data-lang="zh-CN"
+  crossorigin="anonymous"
+  async
+></script>

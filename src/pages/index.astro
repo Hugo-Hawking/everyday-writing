@@ -1,0 +1,27 @@
+---
+// 首页：按 date 倒序列出 posts。
+// ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §2（index.astro 职责）
+import { getCollection } from 'astro:content';
+import Base from '../layouts/Base.astro';
+
+const posts = (await getCollection('posts')).sort(
+  (a, b) => b.data.date.valueOf() - a.data.date.valueOf(),
+);
+---
+<Base title="everyday-writing">
+  <h1>everyday-writing</h1>
+  <ul>
+    {
+      posts.map((post) => (
+        <li>
+          <a href={`${import.meta.env.BASE_URL}posts/${post.data.slug}/`}>
+            {post.data.title}
+          </a>
+          <time datetime={post.data.date.toISOString()}>
+            {post.data.date.toISOString().slice(0, 10)}
+          </time>
+        </li>
+      ))
+    }
+  </ul>
+</Base>

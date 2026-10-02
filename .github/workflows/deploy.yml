@@ -1,0 +1,50 @@
+# 构建 Astro 站点并部署到 GitHub Pages（项目站 base=/everyday-writing/）。
+# ref: reference/plans/2026-10-02_phase1_端到端闭环/plan.md §3 步骤4（on.push.main → npm ci → npm run build → upload-pages-artifact → deploy-pages）
+# ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §2（deploy.yml 职责，~45 行）
+# ref: reference/knowledge/architecture/2026-10-02_架构决策.md §3 步骤4 / RULES §1.5（第三方 Action 用固定版本 tag、Pages Source=GitHub Actions）
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: # 便于手动重跑（plan §3 步骤4 指令要求）
+
+# GitHub Pages 部署必需的最小权限集（键名与官方 Pages 部署模板一致）。
+# ref: RULES §1.5 权限矩阵（Actions 内读写 Deployment 需 workflow 显式声明 permissions）
+permissions:
+  contents: read # 读仓库以构建
+  pages: write # 写 Pages Deployment
+  id-token: write # OIDC 令牌，deploy-pages 校验来源需要
+
+# 同一时刻只跑一个 Pages 部署；不取消进行中的部署，避免已发布站点被中途打断。
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      # 第三方 Action 一律固定版本 tag，禁止 @master（RULES §1.5 供应链安全）
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          # Node 版本依据：装机 astro engines.node = ">=22.12.0"（node_modules/astro/package.json:199-201，站点 package.json:5-7 同）
+          #   → Node 20 不满足；本机开发为 Node v24.15.0（LTS）。取 24 使 CI 与本地一致。
+          node-version: '24'
+          cache: npm # 依赖 package-lock.json（仓库根已存在且未被 .gitignore 排除）
+      - run: npm ci # 依赖 package-lock.json 做可复现安装
+      - run: npm run build # Astro 静态构建，产物在 dist/
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
