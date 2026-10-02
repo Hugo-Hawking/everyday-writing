@@ -1,0 +1,140 @@
+# 文章评论触发链：文章 md 变更 / 手动 / repository_dispatch → 跑 bot 写 Discussion 评论。
+#
+# ref: reference/plans/2026-10-02_phase1_端到端闭环/plan.md §3 步骤6（三种触发 + permissions + --commit）
+# ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §2（bot-review.yml 职责，~40 行）、§4 数据流向
+# ref: reference/knowledge/architecture/2026-10-02_架构决策.md §3 步骤6 / RULES §1.5（permissions、固定版本 tag）
+#
+# 🔴 红队点 1（plan §8 · 本步骤冒烟要看的点，勿在本步试图解决）：
+#    review_post.py 的 find_discussion 以「标题 + 分类 id」双条件校验，首次运行会**新建** Discussion
+#    （标题 = 文章 slug）。**未实证**：github-actions[bot] 用 GITHUB_TOKEN 建的 Discussion，
+#    能否被 giscus（以 giscus GitHub App 身份、按 data-mapping="specific" 的 data-term=slug 搜索）命中
+#    并在文章页评论区内显示。这是全案最大不确定点（架构知识 §6.3 / plan 假设 3）。
+#    本步冒烟 = 触发一次本 workflow，然后**手动打开文章页**看评论区是否出现该 bot 评论：
+#      - 出现 → 红队点 1 排除；
+#      - 不出现 → 命中，回到「查 giscus App 安装范围 + Discussion 分类是否 = giscus data-category(General)」。
+name: Bot Review Post
+
+on:
+  push:
+    # 仅当文章内容变更时触发（plan §3 步骤6 原文）。
+    paths: ['src/content/posts/*.md']
+  workflow_dispatch:
+    inputs:
+      path:
+        description: '要评论的文章 md 路径（相对仓库根）'
+        required: true
+        # 默认值 = 首篇文章（plan §3 步骤6「给个合理默认（首篇文章）」）。
+        default: 'src/content/posts/2026-10-02_hello-world.md'
+        type: string
+  repository_dispatch:
+    # 接口层（步骤 7 publish.yml / 外部调用）用它触发评论。
+    types: [review-post]
+
+# ref: RULES §1.5 权限矩阵 —— 缺 discussions: write 会在写 Discussion 时**静默 403**（本步红队点级别）。
+permissions:
+  contents: read # checkout 读仓库（取变更文章 / 跑脚本）
+  discussions: write # bot 建 Discussion + 加评论所需
+
+# 串行化：避免同一来源被并发触发时同时 createDiscussion（并发竞态 → 重复建库）。
+# 注意：concurrency 只能防「同时执行」，无法消除「先后两次触发」的重复评论
+#       —— 后者需幂等逻辑，phase1 未实现（见 implementation_notes 步骤5 裁定 #6）。
+concurrency:
+  group: bot-review-${{ inputs.path || github.event.client_payload.path || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    steps:
+      # 第三方 Action 一律固定版本 tag，禁止 @master（RULES §1.5 供应链安全）
+      - uses: actions/checkout@v4
+        with:
+          # push 事件用 `git diff HEAD^ HEAD` 解析变更文章，需要父提交 → 浅克隆（默认 fetch-depth:1）拿不到 HEAD^。
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          # 纯标准库脚本，无需 pip install / requirements.txt（RULES §12 最小依赖）。
+          python-version: '3.12'
+
+      # 解析本次要评论的目标文章（三种触发各自取法），经 $GITHUB_OUTPUT 传给下一步。
+      # ref: plan §3 步骤6（workflow_dispatch→inputs.path；repository_dispatch→client_payload.path；push→git diff）
+      - name: Resolve target post(s)
+        id: targets
+        shell: bash
+        # 目标值经 env 传入而非直接 ${{ }} 内联进脚本，避免 payload 值注入命令位置（GitHub 官方安全加固建议）。
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          MANUAL_PATH: ${{ inputs.path }}
+          DISPATCH_PATH: ${{ github.event.client_payload.path }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            workflow_dispatch)
+              # ref: plan §3 步骤6（workflow_dispatch → inputs.path）
+              target="${MANUAL_PATH:-}"
+              if [ -z "$target" ]; then
+                echo "::error::workflow_dispatch 未提供 inputs.path，无法确定目标文章。"
+                exit 1
+              fi
+              files="$target"
+              ;;
+            repository_dispatch)
+              # ref: plan §3 步骤6（repository_dispatch → client_payload.path；未带则跳过并明确报错，不静默）
+              target="${DISPATCH_PATH:-}"
+              if [ -z "$target" ]; then
+                echo "::error::repository_dispatch(review-post) 的 client_payload 缺少 path 字段；本次跳过（不静默放行）。"
+                exit 1
+              fi
+              files="$target"
+              ;;
+            push)
+              # ref: plan §3 步骤6（push → git diff --name-only HEAD^ HEAD -- 'src/content/posts/*.md'）
+              # 首次推送 / 无父提交边界：明确报错，不静默放行（plan §3 步骤6）。
+              if ! git rev-parse --verify HEAD^ >/dev/null 2>&1; then
+                echo "::error::本次 push 无父提交（首次推送或浅克隆），无法用 git diff HEAD^ HEAD 计算变更文章；请改用 workflow_dispatch 指定 path。"
+                exit 1
+              fi
+              # --diff-filter=ACMR：只取 新增/复制/修改/重命名（排除 D 删除）——被删文章无正文可评，避免脚本对不存在文件报错。
+              # ⚠️ 已知局限：HEAD^..HEAD 只看「本次 push 的最后一个提交」；一次 push 含多个提交时，
+              #    中间提交对 posts/*.md 的改动可能被漏掉（plan 步骤6 指定用 HEAD^ HEAD 口径，此处不改方案）。
+              files="$(git diff --name-only --diff-filter=ACMR HEAD^ HEAD -- 'src/content/posts/*.md')"
+              if [ -z "$files" ]; then
+                echo "::error::push 事件未解析到任何变更的 src/content/posts/*.md（与 paths 过滤器不一致？）。"
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::未知触发事件：$EVENT_NAME"
+              exit 1
+              ;;
+          esac
+
+          # 多行输出（每行一个文件）经 $GITHUB_OUTPUT 传给下一步。
+          {
+            echo "files<<__BOT_REVIEW_EOF__"
+            printf '%s\n' "$files"
+            echo "__BOT_REVIEW_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Run bot (review each target post)
+        # ref: RULES §1.5 —— GITHUB_TOKEN 必须作为 env 传给脚本（脚本读的是环境变量，非参数）；DEEPSEEK_API_KEY 同理。
+        env:
+          DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TARGETS: ${{ steps.targets.outputs.files }}
+        run: |
+          set -euo pipefail
+          count=0
+          while IFS= read -r post; do
+            [ -z "$post" ] && continue
+            count=$((count + 1))
+            echo "==> 处理文章：$post"
+            # ref: plan §3 步骤6（对每个目标文件执行 review_post.py --path <file> --commit）
+            python scripts/bot/review_post.py --path "$post" --commit
+          done <<< "$TARGETS"
+          if [ "$count" -eq 0 ]; then
+            # resolve 步骤理应已挡住空输入；此处兜底，绝不静默放行（RULES §12.4）。
+            echo "::error::resolve 步骤未产出任何目标文章。"
+            exit 1
+          fi
