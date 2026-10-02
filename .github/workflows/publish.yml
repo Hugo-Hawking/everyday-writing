@@ -1,0 +1,206 @@
+# 接口层：repository_dispatch(new-post) → 写文章 md → commit + push → 触发后续链路。
+# ref: reference/plans/2026-10-02_phase1_端到端闭环/plan.md §3 步骤7（接口层）+ §8 红队点 4
+# ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §2（publish.yml 职责 ~45 行）、§4 数据流向
+# ref: reference/knowledge/architecture/2026-10-02_架构决策.md §3.1（new-post payload 契约）
+# ref: RULES §1.5（第三方 Action 固定版本 tag、密钥不入库、token 语义）
+#
+# ⚠️🔴 关于「push 应链式触发 deploy + bot-review」—— plan §3 步骤7 的假设是【错的】，勿改回去：
+#   GitHub 官方规定：**用仓库自带 GITHUB_TOKEN 完成的 push（或建 tag/release/PR），不会触发其它
+#   workflow 运行**（防递归机制）——且【不报错、无 skipped run、Actions 页什么都不显示】，
+#   外观与「on: 过滤器配错」完全一样，极易误判。故本步骤仅靠 push，文章虽入库，但
+#   deploy.yml / bot-review.yml 【都不会被自动触发】。
+#   因此 push 之后【必须显式】用 `gh workflow run` 触发这两条（见下方 "Trigger downstream workflows"）。
+#
+# ✅ 关键事实（支撑下方显式触发可行；2026-10-02 经 WebSearch 复核官方文档）：
+#   `workflow_dispatch` 与 `repository_dispatch` 是上述防递归规则的【两个例外】——GitHub 于
+#   2022-09-08 起明确放行（"since they are explicit calls made by the customer and not likely to
+#   end up in a loop"）。即 GITHUB_TOKEN 【可以】触发 workflow_dispatch，前提是 workflow 显式授予
+#   permissions: actions: write（workflow_dispatch REST 端点所需）。
+#
+# ⚠️ 待运行时确认（本次【不】实现备选分支，RULES §12：不为未验证的分支预留代码）：
+#   上述例外虽经官方文档核实，但本项目【尚未云端实证】该路径真能产生 run（可能因权限粒度/仓库设置被拒）。
+#   备选方案（若步骤 7 冒烟出现 403 / Actions 页无新 run）：
+#     - 建一个带 `repo` + `workflow` scope 的 PAT，存为 Secret（如 `PUSH_TOKEN`）；
+#     - 把 push 与 `gh workflow run` 都换用 `GH_TOKEN: ${{ secrets.PUSH_TOKEN }}`，并让 checkout
+#       也带上该 token（`with: token: ${{ secrets.PUSH_TOKEN }}`）——因为 actions/checkout 默认
+#       `persist-credentials: true` 会把 checkout 用的 token 写进 .git 配置，之后 `git push` 仍以
+#       GITHUB_TOKEN 身份认证（`GH_TOKEN` 环境变量只影响 gh CLI，不影响裸 git）。
+#      用 PAT 触发的 push 会像人工 push 一样正常链式触发 workflow，届时显式 gh workflow run 亦可保留（更可控）。
+#
+# 已知局限（属【调用方】的事，非本 workflow 职责；plan §8 红队点 4）：
+#   触发本 workflow 的 repository_dispatch(new-post) 需【外部调用方】自带 `repo` scope 的 PAT
+#   （Actions 内 GITHUB_TOKEN 不能向本仓库发 dispatch 以启动另一条工作流；本文件靠 push 后显式
+#   gh workflow run 规避，不依赖 dispatch 链式）。
+name: Publish Post
+
+on:
+  # 外部 POST /repos/Hugo-Hawking/everyday-writing/dispatches（event_type=new-post）触发。
+  # ref: plan §3 步骤7（on.repository_dispatch(new-post)）+ 架构知识 §3.1 payload 契约
+  repository_dispatch:
+    types: [new-post]
+
+# ref: RULES §1.5 权限矩阵
+permissions:
+  contents: write # 写入文章 md 并 git push 回仓库
+  actions: write # gh workflow run 显式触发 deploy.yml / bot-review.yml（workflow_dispatch REST 端点需要）
+
+# 串行化：避免并发 publish 同时 push 造成 git push 竞态（后到者被拒）。
+concurrency:
+  group: publish-post
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      # 第三方 Action 一律固定版本 tag，禁止 @master（RULES §1.5 供应链安全）
+      - uses: actions/checkout@v4
+        with:
+          # 全量克隆：从浅克隆 push 新提交在某些情况下会被远端拒绝（shallow update not allowed）。
+          fetch-depth: 0
+
+      # 校验 payload（系统边界，RULES §12.2 允许且应当校验），归一化 frontmatter 字段经 $GITHUB_OUTPUT 传给下一步。
+      # ref: plan §3 步骤7（用 payload 的 title/slug/date/content 写文件）
+      - name: Validate payload
+        id: payload
+        shell: bash
+        env:
+          # payload 值经 env 传入而非直接 ${{ }} 内联进 shell，避免注入命令位置（GitHub 官方安全加固建议）。
+          TITLE: ${{ github.event.client_payload.title }}
+          SLUG: ${{ github.event.client_payload.slug }}
+          DATE: ${{ github.event.client_payload.date }}
+          CONTENT: ${{ github.event.client_payload.content }}
+          DESCRIPTION: ${{ github.event.client_payload.description }}
+          TAGS_JSON: ${{ toJSON(github.event.client_payload.tags) }}
+        run: |
+          set -euo pipefail
+          # 按字符（而非字节）处理中文 description 首句截断。
+          export LANG=C.UTF-8 LC_ALL=C.UTF-8
+
+          # 四字段齐全且非空（缺一即明确报错退出，不静默写坏文件）。
+          # ref: plan §3 步骤7（title/slug/date/content 四字段）
+          for pair in "title:$TITLE" "slug:$SLUG" "date:$DATE" "content:$CONTENT"; do
+            name="${pair%%:*}"; value="${pair#*:}"
+            if [ -z "$value" ]; then
+              echo "::error::payload 缺少或为空的必填字段：$name"
+              exit 1
+            fi
+          done
+
+          # date 形如 YYYY-MM-DD
+          if ! printf '%s' "$DATE" | grep -Eq '^[0-9]{4}-[0-9]{2}-[0-9]{2}$'; then
+            echo "::error::payload.date 非法（应为 YYYY-MM-DD）：$DATE"
+            exit 1
+          fi
+
+          # slug 只含 [a-z0-9-]
+          if ! printf '%s' "$SLUG" | grep -Eq '^[a-z0-9-]+$'; then
+            echo "::error::payload.slug 非法（只允许 [a-z0-9-]）：$SLUG"
+            exit 1
+          fi
+
+          # 目标文件已存在 → 报错退出（不覆盖用户已有文章）。
+          target="src/content/posts/${DATE}_${SLUG}.md"
+          if [ -e "$target" ]; then
+            echo "::error::目标文件已存在，拒绝覆盖：$target"
+            exit 1
+          fi
+
+          # description 缺省 → 取正文首句（首个非空行 → 去行首 markdown 标记 → 截到首个句末标点）。
+          # ref: 派发要求「description 若 payload 未给就用正文首句截断」
+          if [ -z "$DESCRIPTION" ]; then
+            DESCRIPTION="$(printf '%s' "$CONTENT" \
+              | awk 'NF { sub(/^[#>*+-]+[[:space:]]*/, ""); print; exit }' \
+              | sed -E 's/[。！？.!?].*$//')"
+          fi
+          if [ -z "$DESCRIPTION" ]; then
+            echo "::error::无法得到 description（payload.description 为空且正文无可用首句）。"
+            exit 1
+          fi
+
+          # tags：缺省 → 空数组；若提供则须为字符串数组（jq 校验，非字符串数组即快速失败）。
+          # ref: 派发要求「tags 默认空数组」
+          if [ -z "$TAGS_JSON" ] || [ "$TAGS_JSON" = "null" ]; then
+            TAGS_YAML="[]"
+          else
+            TAGS_YAML="$(printf '%s' "$TAGS_JSON" \
+              | jq -c 'if type=="array" and all(.[]; type=="string") then . else error("tags must be an array of strings") end')" \
+              || { echo "::error::payload.tags 必须是字符串数组。"; exit 1; }
+          fi
+
+          # title/description 为任意用户串 → 按 YAML double-quoted 标量转义（\ → \\，\" → \\"，换行 → 空格）。
+          yaml_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/ }"; printf '%s' "$s"; }
+          TITLE_ESC="$(yaml_escape "$TITLE")"
+          DESCRIPTION_ESC="$(yaml_escape "$DESCRIPTION")"
+
+          # 经 $GITHUB_OUTPUT 传给下一步（多行正文用 heredoc 定界符）。
+          {
+            echo "path=$target"
+            echo "date=$DATE"
+            echo "slug=$SLUG"
+            echo "title_esc=$TITLE_ESC"
+            echo "description_esc=$DESCRIPTION_ESC"
+            echo "tags_yaml=$TAGS_YAML"
+            echo "body<<__PUBLISH_BODY_EOF__"
+            printf '%s\n' "$CONTENT"
+            echo "__PUBLISH_BODY_EOF__"
+          } >> "$GITHUB_OUTPUT"
+
+      # 写文章 md（frontmatter + 正文）。
+      # ref: plan §3 步骤7（写 src/content/posts/<date>_<slug>.md）
+      # frontmatter 字段与 src/content.config.ts schema 严格一致：title/date/slug/description/tags 均【必填】。
+      - name: Write post file
+        shell: bash
+        env:
+          POST_PATH: ${{ steps.payload.outputs.path }}
+          DATE: ${{ steps.payload.outputs.date }}
+          SLUG: ${{ steps.payload.outputs.slug }}
+          TITLE_ESC: ${{ steps.payload.outputs.title_esc }}
+          DESCRIPTION_ESC: ${{ steps.payload.outputs.description_esc }}
+          TAGS_YAML: ${{ steps.payload.outputs.tags_yaml }}
+          BODY: ${{ steps.payload.outputs.body }}
+        run: |
+          set -euo pipefail
+          {
+            echo "---"
+            echo "title: \"$TITLE_ESC\""
+            echo "date: $DATE"
+            echo "slug: $SLUG"
+            echo "description: \"$DESCRIPTION_ESC\""
+            echo "tags: $TAGS_YAML"
+            echo "---"
+            echo ""
+            printf '%s' "$BODY"
+          } > "$POST_PATH"
+          echo "已写入：$POST_PATH"
+          cat "$POST_PATH"
+
+      # 提交并 push（GITHUB_TOKEN 身份；此 push【不会】触发其它 workflow，见文件头说明）。
+      # ref: plan §3 步骤7（git commit && push）
+      - name: Commit and push
+        shell: bash
+        env:
+          POST_PATH: ${{ steps.payload.outputs.path }}
+          SLUG: ${{ steps.payload.outputs.slug }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$POST_PATH"
+          git commit -m "post: $SLUG"
+          git push origin HEAD:main
+
+      # 显式触发后续链路（补偿「GITHUB_TOKEN push 不触发 workflow」的平台限制，见文件头说明）。
+      # ref: plan §3 步骤7（链式触发 deploy + bot-review）
+      - name: Trigger downstream workflows
+        shell: bash
+        env:
+          # gh CLI 读 GH_TOKEN；裸 git 的凭据由 actions/checkout 的 persist-credentials 处理。
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          POST_PATH: ${{ steps.payload.outputs.path }}
+        run: |
+          set -euo pipefail
+          # deploy.yml：重新构建 + 部署 Pages，使新文章上线。
+          gh workflow run deploy.yml --repo Hugo-Hawking/everyday-writing --ref main
+          # bot-review.yml：对该文跑 DeepSeek 评论（workflow_dispatch 入参 path）。
+          gh workflow run bot-review.yml --repo Hugo-Hawking/everyday-writing --ref main -f path="$POST_PATH"
