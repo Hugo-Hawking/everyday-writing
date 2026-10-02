@@ -100,8 +100,11 @@ jobs:
               #    中间提交对 posts/*.md 的改动可能被漏掉（plan 步骤6 指定用 HEAD^ HEAD 口径，此处不改方案）。
               files="$(git diff --name-only --diff-filter=ACMR HEAD^ HEAD -- 'src/content/posts/*.md')"
               if [ -z "$files" ]; then
-                echo "::error::push 事件未解析到任何变更的 src/content/posts/*.md（与 paths 过滤器不一致？）。"
-                exit 1
+                # 纯删除文章的 push：--diff-filter=ACMR 已排除删除，解析到 0 篇 ⇒ 本无事可做（非错误）。
+                # 区分「无事可做」与「真错误」：显式 notice 提示 + 不报错（本步最终以 0 退出 → 绿），仍不静默放行；
+                # 下游 Run bot 步骤由 has_targets 守卫跳过（见下方输出块与 Run bot step 的 if:）。
+                # ref: plan 顶部「变更：bot-review.yml 纯删除 push 由『红』改『绿』」块 + §3 步骤6「修订（2026-10-02）」（用户裁定）。
+                echo "::notice::push 事件解析到 0 篇变更的 src/content/posts/*.md（纯删除文章等「无事可做」场景），跳过评论。"
               fi
               ;;
             *)
@@ -117,7 +120,18 @@ jobs:
             echo "__BOT_REVIEW_EOF__"
           } >> "$GITHUB_OUTPUT"
 
+          # 是否有目标文章：files 非空 → true，空 → false。供下游 Run bot 步骤的 if: 守卫跳过空目标。
+          # ref: plan 顶部「变更：bot-review.yml 纯删除 push 由『红』改『绿』」块 + §3 步骤6「修订（2026-10-02）」。
+          if [ -n "$files" ]; then
+            echo "has_targets=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_targets=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Run bot (review each target post)
+        # 空目标（如纯删除 push）→ 跳过本步，不触发步内 count==0 兜底报错。
+        # ref: plan 顶部「变更：bot-review.yml 纯删除 push 由『红』改『绿』」块 + §3 步骤6「修订（2026-10-02）」（用户裁定）。
+        if: steps.targets.outputs.has_targets == 'true'
         # ref: RULES §1.5 —— GITHUB_TOKEN 必须作为 env 传给脚本（脚本读的是环境变量，非参数）；DEEPSEEK_API_KEY 同理。
         env:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}

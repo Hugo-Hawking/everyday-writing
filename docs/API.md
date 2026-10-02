@@ -137,6 +137,8 @@ permissions:
 
 任一触发的目标为空/解析不到 → `::error::` + 退出 1（**不静默放行**）。`push` 触发在无父提交（首次推送/浅克隆）时同样报错退出。
 
+> **例外（2026-10-02 修订）：`push` 纯删除文章**。`push` 分支用 `--diff-filter=ACMR` 排除删除；若本次 push 只删文（解析到 0 篇），则输出 `::notice::` 并以 0 退出（**绿 run**），同时以 `has_targets=false` 让 `Run bot` 步骤**跳过**（不评论）——「本无事可做」不再表达为失败。其余空结果（`workflow_dispatch`/`repository_dispatch` 缺 `path`、未知事件、`push` 无父提交）仍一律 `::error::` + 退出 1。
+
 **repository_dispatch 调用样例**：
 
 ```bash
