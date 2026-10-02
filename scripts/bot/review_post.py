@@ -17,7 +17,12 @@ from lib.md_parse import parse_post                         # ref: code_structur
 
 # 常量（允许环境变量覆盖）；值为主 Agent 已确认实取（2026-10-02）
 REPO = os.environ.get("GITHUB_REPOSITORY", "Hugo-Hawking/everyday-writing")          # ref: 裁定「已确认的常量」
-REPO_ID = os.environ.get("GITHUB_REPOSITORY_ID", "R_kgDOU5AWOg")                     # ref: 常量（GraphQL repository.id）
+# ⚠️ 本变量的环境变量名必须带项目前缀 DISCUSSIONS_，切勿改回 GITHUB_REPOSITORY_ID：
+#    GitHub Actions 会自动注入保留环境变量 GITHUB_REPOSITORY_ID=<数字仓库 id>（如 1401951802），
+#    与本项目 GraphQL 需要的「全局 node id」（如 R_kgDOU5AWOg）语义不同；同名会让平台注入值
+#    覆盖默认值，导致 createDiscussion 报 NOT_FOUND: Could not resolve to a node with the global id of '<数字>'。
+#    ref: 步骤 6 冒烟失败根因（run 37026079399）；与下方 DISCUSSIONS_CATEGORY_* 保持同前缀。
+REPO_ID = os.environ.get("DISCUSSIONS_REPO_ID", "R_kgDOU5AWOg")                      # ref: 常量（GraphQL repository.id）
 CATEGORY_NAME = os.environ.get("DISCUSSIONS_CATEGORY_NAME", "General")               # ref: 常量（giscus data-category 须与此同）
 CATEGORY_ID = os.environ.get("DISCUSSIONS_CATEGORY_ID", "DIC_kwDOU5AWOs4DG48K")      # ref: 常量（General 分类 node id）
 
