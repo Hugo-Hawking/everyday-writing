@@ -9,11 +9,11 @@
 // data-strict="0" 依据（实测 §2.5 源码实证）：strict=1 并非「标题精确匹配」，而是改用 sha1(term) 在 Discussion **body** 里搜
 //   （in:body），须 bot 建库时把 sha1(term) 写进 body 才生效。本项目对齐铁律是「标题 = slug」（bot 只写 title=slug、不写 sha1），
 //   故 strict=1 会找不到库（giscus 甚至另建重复库）；保持默认 strict=0（按标题搜索），容错由步骤 5 bot 搜后校验 nodes[0].title===term 兜住（实测 §6 待确认 2）。
-// ⚠️ TODO：repoId / category / categoryId 为占位符——仓库与 Discussions 尚未创建（人类前置清单 1–3 未完成）。
-//    回填来源：仓库创建并开启 Discussions 后，用 `gh api graphql` 查
-//      repository(owner,name){ id }  → data-repo-id
-//      repository.discussionCategories(first:10){ nodes{ id name } } → data-category / data-category-id
-//    （见 plan.md §3 步骤0 / code_structure.md §3「分类 id」；gh CLI 本机当前未安装，见 implementation_notes）
+// repoId/category 于 2026-10-02 仓库建成后经 GraphQL 实取（gh 已登录）：
+//   repository(owner:"Hugo-Hawking",name:"everyday-writing"){ id discussionCategories(first:20){nodes{id name}} }
+//   分类取 General（node id 见下）而非 giscus 常荐的 Announcements：Announcements 类目限制只有维护者可建帖，
+//   而本项目的 Discussion 由 Actions 内 `github-actions[bot]`（GITHUB_TOKEN）创建，是否有维护者权限未实证（红队点 1）。
+//   General 允许任意有权者建帖，先消除该失败路径；若日后要收紧，改分类需同步 bot 建立权限验证。
 interface Props {
   term: string; // = 该文 frontmatter slug（Discussion 标题）
 }
@@ -23,9 +23,9 @@ const REPO = 'Hugo-Hawking/everyday-writing';
 <script
   src="https://giscus.app/client.js"
   data-repo={REPO}
-  data-repo-id="TODO_REPO_ID"
-  data-category="TODO_CATEGORY_NAME"
-  data-category-id="TODO_CATEGORY_ID"
+  data-repo-id="R_kgDOU5AWOg"
+  data-category="General"
+  data-category-id="DIC_kwDOU5AWOs4DG48K"
   data-mapping="specific"
   data-term={term}
   data-strict="0"
