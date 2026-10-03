@@ -3,6 +3,9 @@
 # ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §2（publish.yml 职责 ~45 行）、§4 数据流向
 # ref: reference/knowledge/architecture/2026-10-02_架构决策.md §3.1（new-post payload 契约）
 # ref: RULES §1.5（第三方 Action 固定版本 tag、密钥不入库、token 语义）
+# 扩展（plan §3 步骤7 系列字段，2026-10-03）：payload 新增可选 `series`/`order`。
+#   有 series 则必须配整数 order，且 series 须对应已存在的 src/content/series/<id>.md（校验不静默）；
+#   二者均缺省时不写这两行 → 普通文章 frontmatter 逐字不变（不回归）。
 #
 # ⚠️🔴 关于「push 应链式触发 deploy + bot-review」—— plan §3 步骤7 的假设是【错的】，勿改回去：
 #   GitHub 官方规定：**用仓库自带 GITHUB_TOKEN 完成的 push（或建 tag/release/PR），不会触发其它
@@ -72,6 +75,9 @@ jobs:
           CONTENT: ${{ github.event.client_payload.content }}
           DESCRIPTION: ${{ github.event.client_payload.description }}
           TAGS_JSON: ${{ toJSON(github.event.client_payload.tags) }}
+          # 系列字段（可选）：plan §3 步骤7。缺省为空 → 普通文章。
+          SERIES: ${{ github.event.client_payload.series }}
+          ORDER: ${{ github.event.client_payload.order }}
         run: |
           set -euo pipefail
           # 按字符（而非字节）处理中文 description 首句截断。
@@ -128,6 +134,30 @@ jobs:
               || { echo "::error::payload.tags 必须是字符串数组。"; exit 1; }
           fi
 
+          # 系列字段（可选）：给了 series 则必须配合法整数 order，且 series 须对应已存在的系列元数据。
+          # ref: plan §3 步骤7（series/order 可选；有 series 必有整数 order；series 须对应 src/content/series/<id>.md，报错不静默）
+          if [ -n "$SERIES" ]; then
+            if ! printf '%s' "$SERIES" | grep -Eq '^[a-z0-9-]+$'; then
+              echo "::error::payload.series 非法（只允许 [a-z0-9-]）：$SERIES"
+              exit 1
+            fi
+            if [ -z "$ORDER" ]; then
+              echo "::error::payload 提供了 series 但缺少 order（系列章节必须带整数 order）"
+              exit 1
+            fi
+            if ! printf '%s' "$ORDER" | grep -Eq '^[0-9]+$'; then
+              echo "::error::payload.order 非法（应为非负整数）：$ORDER"
+              exit 1
+            fi
+            if [ ! -f "src/content/series/${SERIES}.md" ]; then
+              echo "::error::payload.series 指向不存在的系列元数据（缺 src/content/series/${SERIES}.md）"
+              exit 1
+            fi
+          elif [ -n "$ORDER" ]; then
+            echo "::error::payload 提供了 order 但缺少 series（order 仅用于系列章节）"
+            exit 1
+          fi
+
           # title/description 为任意用户串 → 按 YAML double-quoted 标量转义（\ → \\，\" → \\"，换行 → 空格）。
           yaml_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/ }"; printf '%s' "$s"; }
           TITLE_ESC="$(yaml_escape "$TITLE")"
@@ -141,6 +171,9 @@ jobs:
             echo "title_esc=$TITLE_ESC"
             echo "description_esc=$DESCRIPTION_ESC"
             echo "tags_yaml=$TAGS_YAML"
+            # 系列字段经 $GITHUB_OUTPUT 传给下一步；即使为空也输出空串，下游据此判断是否写这两行。
+            echo "series=$SERIES"
+            echo "order=$ORDER"
             echo "body<<__PUBLISH_BODY_EOF__"
             printf '%s\n' "$CONTENT"
             echo "__PUBLISH_BODY_EOF__"
@@ -158,6 +191,9 @@ jobs:
           TITLE_ESC: ${{ steps.payload.outputs.title_esc }}
           DESCRIPTION_ESC: ${{ steps.payload.outputs.description_esc }}
           TAGS_YAML: ${{ steps.payload.outputs.tags_yaml }}
+          # 系列字段（可选，取自 Validate payload 的 $GITHUB_OUTPUT）。
+          SERIES: ${{ steps.payload.outputs.series }}
+          ORDER: ${{ steps.payload.outputs.order }}
           BODY: ${{ steps.payload.outputs.body }}
         run: |
           set -euo pipefail
@@ -168,6 +204,13 @@ jobs:
             echo "slug: $SLUG"
             echo "description: \"$DESCRIPTION_ESC\""
             echo "tags: $TAGS_YAML"
+            # 系列章节追加 series/order 两行（仅 SERIES 非空时；位置在 tags 之后、--- 之前）。
+            # series 已在 Validate payload 校验为 ^[a-z0-9-]+$、order 校验为 ^[0-9]+$ → 均为 YAML 安全标量，无需转义。
+            # ref: plan §3 步骤7 + §8 R9（接口层支持系列字段）
+            if [ -n "$SERIES" ]; then
+              echo "series: $SERIES"
+              echo "order: $ORDER"
+            fi
             echo "---"
             echo ""
             printf '%s' "$BODY"

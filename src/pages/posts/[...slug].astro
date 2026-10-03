@@ -1,7 +1,8 @@
 ---
-// 文章页：渲染 posts 集合条目 + 文末挂 Giscus。
+// 文章页：渲染 posts 集合条目 + 文末挂 Giscus；系列章节额外渲染「上一章/目录/下一章」导航。
 // ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §2（[...slug].astro 职责）
-// ref: node_modules/astro/dist/content/runtime.d.ts:28（getCollection 条目字段 id/data，无 slug）
+// ref: reference/plans/2026-10-03_phase2_系列小说板块/plan.md §3 步骤3（有 series 才渲染导航，不回归）
+// ref: node_modules/astro/dist/content/runtime.d.ts:19/28（getCollection 条目字段 id/data，无 slug）
 // ref: node_modules/astro/types/content.d.ts:74（render(entry) 返回 { Content, headings, ... }）
 import { getCollection, render } from 'astro:content';
 import Base from '../../layouts/Base.astro';
@@ -9,14 +10,33 @@ import Giscus from '../../components/Giscus.astro';
 
 export async function getStaticPaths() {
   const posts = await getCollection('posts');
+  // 系列分桶：同 series 的章节聚一组，并按 order 升序（仅用于算前后章；非系列文章不入桶）。
+  // ref: reference/plans/2026-10-03_phase2_系列小说板块/code_structure.md §4（filter series → sort order）
+  const bySeries = new Map();
+  for (const p of posts) {
+    if (!p.data.series) continue;
+    const bucket = bySeries.get(p.data.series) ?? [];
+    bucket.push(p);
+    bySeries.set(p.data.series, bucket);
+  }
+  for (const bucket of bySeries.values()) {
+    bucket.sort((a, b) => (a.data.order ?? 0) - (b.data.order ?? 0));
+  }
   // 路由段取 frontmatter 的 slug 字段（RULES §1.5：frontmatter slug = 站点 URL 段 = Discussion 标题）
-  return posts.map((post) => ({
-    params: { slug: post.data.slug },
-    props: { post },
-  }));
+  return posts.map((post) => {
+    let prev = null;
+    let next = null;
+    if (post.data.series) {
+      const bucket = bySeries.get(post.data.series);
+      const i = bucket.findIndex((p) => p.data.slug === post.data.slug);
+      prev = bucket[i - 1] ?? null; // 首章 i=0 → bucket[-1] undefined → null
+      next = bucket[i + 1] ?? null; // 末章 → null
+    }
+    return { params: { slug: post.data.slug }, props: { post, prev, next } };
+  });
 }
 
-const { post } = Astro.props;
+const { post, prev, next } = Astro.props;
 const { Content } = await render(post);
 ---
 <Base title={post.data.title}>
@@ -29,6 +49,23 @@ const { Content } = await render(post);
     </p>
     <Content />
   </article>
+  {
+    post.data.series && (
+      <nav>
+        {prev && (
+          <a href={`${import.meta.env.BASE_URL}posts/${prev.data.slug}/`}>
+            ← 上一章：{prev.data.title}
+          </a>
+        )}
+        <a href={`${import.meta.env.BASE_URL}series/${post.data.series}/`}>目录</a>
+        {next && (
+          <a href={`${import.meta.env.BASE_URL}posts/${next.data.slug}/`}>
+            下一章：{next.data.title} →
+          </a>
+        )}
+      </nav>
+    )
+  }
   <section>
     <h2>评论</h2>
     <!-- term = frontmatter slug（= Discussion 标题，RULES §1.5 三处一致性；mapping=specific 下即 giscus data-term） -->

@@ -1,0 +1,40 @@
+---
+// 系列目录页：按 order 升序列出该系列全部章节，供逐章点入。
+// ref: reference/plans/2026-10-03_phase2_系列小说板块/plan.md §3 步骤2（目录页 getStaticPaths 遍历 series）
+// ref: reference/plans/2026-10-03_phase2_系列小说板块/code_structure.md §4（filter data.series===id → sort order 升序）
+// ref: node_modules/astro/dist/content/runtime.d.ts:19（getCollection 条目字段 id/data）
+import { getCollection } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+
+export async function getStaticPaths() {
+  const allSeries = await getCollection('series');
+  const posts = await getCollection('posts');
+  return allSeries.map((s) => {
+    // 同系列章节按 data.order 升序（order 为 optional number，?? 0 仅为满足 TS 可空性）
+    const chapters = posts
+      .filter((p) => p.data.series === s.id)
+      .sort((a, b) => (a.data.order ?? 0) - (b.data.order ?? 0));
+    // 路由段用 series 条目 id（ASCII 文件名），非中文 title（knowledge §7.2 中文 URL 风险）
+    return { params: { slug: s.id }, props: { series: s, chapters } };
+  });
+}
+
+const { series, chapters } = Astro.props;
+---
+<Base title={series.data.title}>
+  <h1>{series.data.title}</h1>
+  {series.data.description && <p>{series.data.description}</p>}
+  <p>状态：{series.data.status}　共 {chapters.length} 章</p>
+  <ol>
+    {
+      chapters.map((c) => (
+        <li>
+          <a href={`${import.meta.env.BASE_URL}posts/${c.data.slug}/`}>
+            第 {c.data.order} 章 · {c.data.title}
+          </a>
+        </li>
+      ))
+    }
+  </ol>
+  <p><a href={`${import.meta.env.BASE_URL}series/`}>← 全部系列</a></p>
+</Base>

@@ -31,15 +31,24 @@ on:
     types: [review-post]
 
 # ref: RULES §1.5 权限矩阵 —— 缺 discussions: write 会在写 Discussion 时**静默 403**（本步红队点级别）。
+# ref: plan §3 步骤6（本步扩展）—— bot 提交追更记忆文件（data/series/）需仓库写权限。
+#      contents 由 read 提升为 write：GITHUB_TOKEN 的权限是「一组 scope」，contents 不能既 read 又 write 两行。
 permissions:
-  contents: read # checkout 读仓库（取变更文章 / 跑脚本）
+  contents: write # bot 提交追更记忆文件 data/series/<id>.md 所需；原为 read（plan §3 步骤6 / RULES §1.5）
   discussions: write # bot 建 Discussion + 加评论所需
 
 # 串行化：避免同一来源被并发触发时同时 createDiscussion（并发竞态 → 重复建库）。
 # 注意：concurrency 只能防「同时执行」，无法消除「先后两次触发」的重复评论
 #       —— 后者需幂等逻辑，phase1 未实现（见 implementation_notes 步骤5 裁定 #6）。
+#
+# 本步改全局组（原按文章路径分组 bot-review-<path>）：同系列不同章并发会争同一记忆文件
+#   （两 run 同时 read-modify-write data/series/<id>.md → 互相覆盖 / git push 非快进，红队点 R3）。
+# 为何取「全局」而非「系列级」：concurrency 在 run 调度时求值，早于 checkout —— push 事件上下文只含
+#   变更文件**路径**（github.event.commits[*].modified），拿不到其 frontmatter 的 series，
+#   无法在 group 表达式里把「路径 → 系列 id」映射出来。全局 bot-review 是最简单稳健的串行界
+#   （牺牲不同文章的并行度，换取记忆写入无竞态；plan §3 步骤6 明列此选项）。
 concurrency:
-  group: bot-review-${{ inputs.path || github.event.client_payload.path || github.ref }}
+  group: bot-review
   cancel-in-progress: false
 
 jobs:
@@ -152,3 +161,48 @@ jobs:
             echo "::error::resolve 步骤未产出任何目标文章。"
             exit 1
           fi
+
+      # 提交追更记忆文件：Run bot 里 review_post.py --commit 已写工作区 data/series/<id>.md，此处落库。
+      # 与 Run bot 同步守卫（has_targets==true）——空目标（如纯删除 push）跳过本步。
+      # 提交面严格限制为 data/series/（红队点 R6 —— 缩小 contents:write 的 blast radius，禁 git add -A / .）。
+      # ref: plan §3 步骤6（运行后新增「提交记忆文件」步骤）+ §8 红队点 R3（防非快进）/ R6（提交面限制）
+      - name: Commit series memory
+        if: steps.targets.outputs.has_targets == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          # data/series/ 不存在 = 非系列 push 的正常场景（本次未涉及系列章节，bot 未写记忆）→ notice + 跳过，不报错。
+          # （注：目录不存在时 `git add data/series/` 会 exit 128「pathspec did not match」，故先守卫。）
+          if [ ! -d data/series ]; then
+            echo "::notice::无 data/series/ 目录（本次未涉及系列章节），跳过记忆提交。"
+            exit 0
+          fi
+
+          # bot 身份与 publish.yml:187-188 一致（GITHUB_TOKEN push 不触发其它 workflow，防递归）。
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          # 只暂存 data/series/ 子树（红队点 R6）。非系列 push 时该目录无变化 → 无暂存变化。
+          git add data/series/
+
+          # 无暂存变化（非系列章 / 记忆未变）→ 不产生空 commit（`git diff --cached --quiet`：无差异退 0、有差异退 1）。
+          if git diff --cached --quiet; then
+            echo "::notice::data/series/ 无暂存变化，跳过提交。"
+            exit 0
+          fi
+
+          git commit -m "bot: update series memory"
+
+          # 防非快进（红队点 R3）：先 rebase 到 origin/main 再 push。
+          # checkout 于 push 事件可能为 detached HEAD → 用显式 refspec（`git pull --rebase origin main` + `git push origin HEAD:main`，
+          # 与 publish.yml:191 同风格）。失败重试 ≤3 次（间隔数秒），耗尽才报错退出（RULES §12：不引入重试框架）。
+          for attempt in 1 2 3; do
+            if git pull --rebase origin main && git push origin HEAD:main; then
+              echo "记忆文件已提交并 push（第 $attempt 次尝试）。"
+              exit 0
+            fi
+            echo "::warning::第 $attempt 次 pull --rebase + push 失败（可能非快进），重试…"
+            sleep 5
+          done
+          echo "::error::记忆文件 push 连续 3 次失败，放弃（红队点 R3）。"
+          exit 1
