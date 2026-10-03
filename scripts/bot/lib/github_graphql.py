@@ -48,8 +48,8 @@ mutation($input: AddDiscussionCommentInput!) {
 }
 """
 
-# 列某 Discussion 顶层评论（⚠️ comments 不接受 orderBy → 由调用方按 createdAt 本地排序）
-# ref: plan §4 假设3（introspection：Field 'comments' doesn't accept argument 'orderBy'，2026-10-03）
+# 列某 Discussion 顶层评论（⚠️ comments 不接受 orderBy → 本方案按 id 排除新评论即可，无需排序）
+# ref: plan §4 假设5（introspection：Field 'comments' doesn't accept argument 'orderBy'，2026-10-03）
 _COMMENTS_QUERY = """
 query($id: ID!, $n: Int!) {
   node(id: $id) {
@@ -63,19 +63,12 @@ query($id: ID!, $n: Int!) {
 }
 """
 
-# 原地更新评论正文（改后 id 不变）
-# ref: plan §4 假设1（UpdateDiscussionCommentInput = {commentId, body}，2026-10-03）
-_UPDATE_COMMENT_QUERY = """
-mutation($input: UpdateDiscussionCommentInput!) {
-  updateDiscussionComment(input: $input) { comment { id url } }
-}
-"""
-
-# 删除评论（用于收敛历史遗留的 bot 重复条）
-# ref: plan §4 假设1（DeleteDiscussionCommentInput = {id}，2026-10-03）
+# 删除评论（用于删除更旧的 bot 评论 → 收敛为一条）
+# ref: plan §4 假设2（deleteDiscussionComment 可用，2026-10-03）
+# ref: plan §4 假设3（payload 字段 = comment，非 deletedCommentId——introspection 实测）
 _DELETE_COMMENT_QUERY = """
 mutation($input: DeleteDiscussionCommentInput!) {
-  deleteDiscussionComment(input: $input) { deletedCommentId }
+  deleteDiscussionComment(input: $input) { comment { id } }
 }
 """
 
@@ -126,9 +119,9 @@ def add_discussion_comment(token, discussion_id, body):
 def list_discussion_comments(token, discussion_id, first=100):
     """列 Discussion 顶层评论；返回 [{id, login, typename, created_at, body}]。
 
-    ⚠️ 不保证顺序（comments 无 orderBy）→ 调用方自行按 created_at 排序。
+    ⚠️ 不保证顺序（comments 无 orderBy）→ 本方案与顺序无关，调用方不依赖顺序。
     ref: plan §3 步骤1（node(id:){...on Discussion{comments(first:$n)}}）
-    ref: plan §4 假设3（无 orderBy → 本地排序）
+    ref: plan §4 假设5（无 orderBy）
     """
     data = _graphql(token, _COMMENTS_QUERY, {"id": discussion_id, "n": first})
     conn = data["node"]["comments"]                          # ref: plan §3 步骤1（返回路径 node.comments）
@@ -140,22 +133,14 @@ def list_discussion_comments(token, discussion_id, first=100):
     ]
 
 
-def update_discussion_comment(token, comment_id, body):
-    """原地覆盖评论正文；返回 {id, url}。
-
-    ref: plan §3 步骤1（updateDiscussionComment(input:{commentId,body})）
-    """
-    data = _graphql(token, _UPDATE_COMMENT_QUERY, {"input": {"commentId": comment_id, "body": body}})
-    return data["updateDiscussionComment"]["comment"]        # ref: plan §3 步骤1（comment{id,url}）
-
-
 def delete_discussion_comment(token, comment_id):
-    """删除评论；返回 deletedCommentId。
+    """删除评论；返回被删评论 {id}（payload 字段 = comment）。
 
     ref: plan §3 步骤1（deleteDiscussionComment(input:{id})）
+    ref: plan §4 假设3（DeleteDiscussionCommentPayload 字段 = comment，非 deletedCommentId）
     """
     data = _graphql(token, _DELETE_COMMENT_QUERY, {"input": {"id": comment_id}})
-    return data["deleteDiscussionComment"]["deletedCommentId"]   # ref: plan §3 步骤1（deletedCommentId）
+    return data["deleteDiscussionComment"]["comment"]        # ref: plan §4 假设3（payload.comment）
 
 
 def _graphql(token, query, variables):

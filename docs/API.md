@@ -231,9 +231,10 @@ python scripts/bot/review_post.py --path <file> --commit
 2. 组 prompt（system 角色设定 + user 文章标题与正文）→ 调 DeepSeek `deepseek-chat` → 得评论文本。
 3. `find_discussion(token, REPO, slug, CATEGORY_ID)`：`search(type:DISCUSSION, last:1, query:"repo:hugo-hawking/everyday-writing in:title \"<slug>\"")`，命中条件 = `nodes[0].title === slug` **且** `nodes[0].category.id === CATEGORY_ID`。
 4. 未命中 → `createDiscussion(repositoryId, categoryId, title=<slug>, body=<占位正文>)`，标题 = slug。
-5. **评论落库（phase4 起改为「更新优先」）**：`listDiscussionComments(discussionId)` 列出该 Discussion 顶层评论 → 按 `author.login` 挑出 bot 自己的评论并按 `createdAt` 倒序（`pick_bot_comments`）：
-   - 有 bot 评论 → `updateDiscussionComment(newest.id, body=<评论文本>)` **原地覆盖**（评论 node id 不变、`totalCount` 不增）；更旧的 bot 重复条逐条 `deleteDiscussionComment` 收敛为一条。
-   - 无 bot 评论 → `addDiscussionComment(discussionId, body=<评论文本>)` 新增。
+5. **评论落库（phase4 起改为「先增后删、收敛为一条」）**：`listDiscussionComments(discussionId)` 列出该 Discussion 顶层评论 → `pick_bot_comments` 仅按 `author.login` 挑出 bot 自己的评论（纯过滤，不排序）：
+   - **先** `addDiscussionComment(discussionId, body=<评论文本>)` **新增**一条最新评论；
+   - **再** 对每条更旧的 bot 评论（`id != 新评论 id`）`deleteDiscussionComment` **删除** → 收敛为恰一条（内容为最新）。
+   - 🔴 **不用 `updateDiscussionComment` 原地更新**：Actions 的 App 身份（`GITHUB_TOKEN`）调用恒 `FORBIDDEN: Resource not accessible by integration` → 故以「增删替换」实现「同一文章至多一条 bot 评论」。
    - 详见 §2.5。
 
 ### 2.3 权限
@@ -250,23 +251,23 @@ permissions:
 
 > **phase2 变更**：`group` 由「按文章路径」改为**全局 `bot-review`**——同系列不同章并发会争同一记忆文件（`data/series/<id>.md`），全局串行消除该竞态（代价：不同文章不再并行）。详见 §4.5。
 
-### 2.5 bot 评论策略（phase4 · 更新自己上一条评论）
+### 2.5 bot 评论策略（phase4 · 同一文章至多一条 bot 评论）
 
-同一篇文章的 Discussion **至多保留一条 bot 评论**；bot 重推（同文再次触发 review-post）时**原地更新**而非追加，避免旧评论堆积、最新评价被顶上。
+同一篇文章的 Discussion **至多保留一条 bot 评论**；bot 重推（同文再次触发 review-post）时**先新增最新评论、再删除旧 bot 评论**（替换而非追加），避免旧评论堆积、最新评价被顶上。
 
 | 情形 | 行为 |
 |------|------|
 | Discussion 不存在 | 新建 Discussion（标题 = slug，占位正文），随后走下方「无 bot 评论」路径 |
 | Discussion 存在、**无** bot 评论 | `addDiscussionComment` **新增**一条 bot 评论 |
-| Discussion 存在、**有** bot 评论 | `updateDiscussionComment` **原地覆盖**最新那条（node id 不变、不新增） |
-| Discussion 存在、**多条** bot 评论（历史遗留） | 更新**最新**那条，并删除**更旧的 bot 重复条** → 收敛为恰一条 |
+| Discussion 存在、**有** bot 评论 | **先** `addDiscussionComment` 新增最新评论 → **再** `deleteDiscussionComment` 删除更旧的 bot 评论 → bot 评论恰一条、内容为最新（新 id） |
 
-- **识别 bot 评论**：仅按 `author.login == BOT_COMMENT_AUTHOR`（默认 `github-actions`，可用同名环境变量覆盖）。🔴 **不得用 `viewerDidAuthor`**——以 OAuth 身份查询 bot 评论时该字段恒为 `false`（2026-10-03 实测，见 plan §4 假设 2）。
-- 🔴 **人类读者评论不受影响**：过滤条件严格 `login == BOT_COMMENT_AUTHOR`；删除额外排除刚更新的 `newest.id`。人类评论永不被选中、永不被改/删。
-- **顺序**：**先更新、后删除**——`_graphql` 无重试，更新失败即 `FATAL` 退出，不会出现「删了旧条却更新失败」的半完成态。
-- **无 `orderBy`**：`Discussion.comments` 不接受 `orderBy` 参数 → 由 `pick_bot_comments` 按 `createdAt`（ISO8601）本地倒序取「最新」。
+- 🔴 **为何用「替换」而非「原地更新」**：Actions 的 App 身份（`GITHUB_TOKEN`）调用 `updateDiscussionComment` **恒返回 `FORBIDDEN: Resource not accessible by integration`**（对既有评论与本轮刚建的评论均如此，2026-10-03 云端实测）→ 平台不允许 App 编辑评论，故以「先增后删」实现「至多一条」。**代价**：重推后评论 **node id 会变**（permalink/锚点变化、reactions 归零）；本项目 giscus 全量渲染评论正文、无依赖固定锚点，可接受。
+- **识别 bot 评论**：仅按 `author.login == BOT_COMMENT_AUTHOR`（默认 `github-actions`，可用同名环境变量覆盖）。🔴 **不得用 `viewerDidAuthor`**——以 OAuth 身份查询 bot 评论时该字段恒为 `false`（2026-10-03 实测，见 plan §4 假设 4）。
+- 🔴 **人类读者评论不受影响**：过滤条件严格 `login == BOT_COMMENT_AUTHOR`；删除额外排除刚新增的 `new_id`。人类评论永不被选中、永不被删。
+- **顺序铁律：先新增、后删除**——`_graphql` 无重试。先增后删时，新增失败即 `FATAL` 退出（旧评论仍在，评论不丢）；删除失败最坏暂留 2 条（下轮自愈）。**禁止**先删后增（新增失败将导致 0 条、评论丢失）。
+- **无 `orderBy`**：`Discussion.comments` 不接受 `orderBy` 参数 → 但本方案删「所有更旧的 bot 评论」，与顺序无关，故 `pick_bot_comments` 只过滤、不排序。
 - **系列追更记忆不变**：`data/series/<id>.md` 的二次调用与落盘逻辑（§4.4/§4.5）**不受本策略影响**；本策略只改「评论文本如何落到 Discussion」。
-- **不回归**：dry-run / `--show-context` 路径不触网（不调 list/update/delete）；随笔、非系列文章照旧走普通读后感路径。
+- **不回归**：dry-run / `--show-context` 路径不触网（不调 list/add/delete）；随笔、非系列文章照旧走普通读后感路径。
 
 ---
 
