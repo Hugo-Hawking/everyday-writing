@@ -231,9 +231,10 @@ python scripts/bot/review_post.py --path <file> --commit
 2. 组 prompt（system 角色设定 + user 文章标题与正文）→ 调 DeepSeek `deepseek-chat` → 得评论文本。
 3. `find_discussion(token, REPO, slug, CATEGORY_ID)`：`search(type:DISCUSSION, last:1, query:"repo:hugo-hawking/everyday-writing in:title \"<slug>\"")`，命中条件 = `nodes[0].title === slug` **且** `nodes[0].category.id === CATEGORY_ID`。
 4. 未命中 → `createDiscussion(repositoryId, categoryId, title=<slug>, body=<占位正文>)`，标题 = slug。
-5. `addDiscussionComment(discussionId, body=<评论文本>)`。
-
-**已知局限（phase1 简化）**：命中已存在的 Discussion 时**直接追加新评论**，不编辑/去重 → 同一文章重复触发会累积多条 bot 评论。幂等逻辑 phase1 未实现。
+5. **评论落库（phase4 起改为「更新优先」）**：`listDiscussionComments(discussionId)` 列出该 Discussion 顶层评论 → 按 `author.login` 挑出 bot 自己的评论并按 `createdAt` 倒序（`pick_bot_comments`）：
+   - 有 bot 评论 → `updateDiscussionComment(newest.id, body=<评论文本>)` **原地覆盖**（评论 node id 不变、`totalCount` 不增）；更旧的 bot 重复条逐条 `deleteDiscussionComment` 收敛为一条。
+   - 无 bot 评论 → `addDiscussionComment(discussionId, body=<评论文本>)` 新增。
+   - 详见 §2.5。
 
 ### 2.3 权限
 
@@ -248,6 +249,24 @@ permissions:
 `concurrency: { group: bot-review, cancel-in-progress: false }`——防同一来源被并发触发时重复建库；但**不能**消除「先后两次触发」的重复评论。
 
 > **phase2 变更**：`group` 由「按文章路径」改为**全局 `bot-review`**——同系列不同章并发会争同一记忆文件（`data/series/<id>.md`），全局串行消除该竞态（代价：不同文章不再并行）。详见 §4.5。
+
+### 2.5 bot 评论策略（phase4 · 更新自己上一条评论）
+
+同一篇文章的 Discussion **至多保留一条 bot 评论**；bot 重推（同文再次触发 review-post）时**原地更新**而非追加，避免旧评论堆积、最新评价被顶上。
+
+| 情形 | 行为 |
+|------|------|
+| Discussion 不存在 | 新建 Discussion（标题 = slug，占位正文），随后走下方「无 bot 评论」路径 |
+| Discussion 存在、**无** bot 评论 | `addDiscussionComment` **新增**一条 bot 评论 |
+| Discussion 存在、**有** bot 评论 | `updateDiscussionComment` **原地覆盖**最新那条（node id 不变、不新增） |
+| Discussion 存在、**多条** bot 评论（历史遗留） | 更新**最新**那条，并删除**更旧的 bot 重复条** → 收敛为恰一条 |
+
+- **识别 bot 评论**：仅按 `author.login == BOT_COMMENT_AUTHOR`（默认 `github-actions`，可用同名环境变量覆盖）。🔴 **不得用 `viewerDidAuthor`**——以 OAuth 身份查询 bot 评论时该字段恒为 `false`（2026-10-03 实测，见 plan §4 假设 2）。
+- 🔴 **人类读者评论不受影响**：过滤条件严格 `login == BOT_COMMENT_AUTHOR`；删除额外排除刚更新的 `newest.id`。人类评论永不被选中、永不被改/删。
+- **顺序**：**先更新、后删除**——`_graphql` 无重试，更新失败即 `FATAL` 退出，不会出现「删了旧条却更新失败」的半完成态。
+- **无 `orderBy`**：`Discussion.comments` 不接受 `orderBy` 参数 → 由 `pick_bot_comments` 按 `createdAt`（ISO8601）本地倒序取「最新」。
+- **系列追更记忆不变**：`data/series/<id>.md` 的二次调用与落盘逻辑（§4.4/§4.5）**不受本策略影响**；本策略只改「评论文本如何落到 Discussion」。
+- **不回归**：dry-run / `--show-context` 路径不触网（不调 list/update/delete）；随笔、非系列文章照旧走普通读后感路径。
 
 ---
 

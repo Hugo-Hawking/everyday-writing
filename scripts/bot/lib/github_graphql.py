@@ -8,12 +8,17 @@ ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §3（�
 """
 
 import json
+import os
 import sys
 import urllib.error
 import urllib.request
 
 GRAPHQL_URL = "https://api.github.com/graphql"     # ref: knowledge §3（GraphQL 单一端点）
 REQUEST_TIMEOUT = 60                               # ref: 网络边界：请求超时（秒）
+
+# bot 自身评论识别：GraphQL 里 bot 评论的 author.login（⚠️ 不用 viewerDidAuthor——对 bot 恒 false）
+# ref: plan §4 假设2（Discussion #8 实测 author.login=="github-actions"、viewerDidAuthor==false，2026-10-03）
+BOT_COMMENT_AUTHOR = os.environ.get("BOT_COMMENT_AUTHOR", "github-actions")
 
 # 按标题找库：search(type:DISCUSSION)，取 nodes 内 Discussion 的 id/title/category
 # ref: knowledge §3.3-1（giscus 采用 search 找库）
@@ -40,6 +45,37 @@ mutation($input: AddDiscussionCommentInput!) {
   addDiscussionComment(input: $input) {
     comment { id url }
   }
+}
+"""
+
+# 列某 Discussion 顶层评论（⚠️ comments 不接受 orderBy → 由调用方按 createdAt 本地排序）
+# ref: plan §4 假设3（introspection：Field 'comments' doesn't accept argument 'orderBy'，2026-10-03）
+_COMMENTS_QUERY = """
+query($id: ID!, $n: Int!) {
+  node(id: $id) {
+    ... on Discussion {
+      comments(first: $n) {
+        totalCount
+        nodes { id author { login __typename } createdAt body }
+      }
+    }
+  }
+}
+"""
+
+# 原地更新评论正文（改后 id 不变）
+# ref: plan §4 假设1（UpdateDiscussionCommentInput = {commentId, body}，2026-10-03）
+_UPDATE_COMMENT_QUERY = """
+mutation($input: UpdateDiscussionCommentInput!) {
+  updateDiscussionComment(input: $input) { comment { id url } }
+}
+"""
+
+# 删除评论（用于收敛历史遗留的 bot 重复条）
+# ref: plan §4 假设1（DeleteDiscussionCommentInput = {id}，2026-10-03）
+_DELETE_COMMENT_QUERY = """
+mutation($input: DeleteDiscussionCommentInput!) {
+  deleteDiscussionComment(input: $input) { deletedCommentId }
 }
 """
 
@@ -85,6 +121,41 @@ def add_discussion_comment(token, discussion_id, body):
         "body": body,
     }})
     return data["addDiscussionComment"]["comment"]           # ref: knowledge §3.2（返回路径）
+
+
+def list_discussion_comments(token, discussion_id, first=100):
+    """列 Discussion 顶层评论；返回 [{id, login, typename, created_at, body}]。
+
+    ⚠️ 不保证顺序（comments 无 orderBy）→ 调用方自行按 created_at 排序。
+    ref: plan §3 步骤1（node(id:){...on Discussion{comments(first:$n)}}）
+    ref: plan §4 假设3（无 orderBy → 本地排序）
+    """
+    data = _graphql(token, _COMMENTS_QUERY, {"id": discussion_id, "n": first})
+    conn = data["node"]["comments"]                          # ref: plan §3 步骤1（返回路径 node.comments）
+    return [
+        {"id": c["id"], "login": (c.get("author") or {}).get("login"),
+         "typename": (c.get("author") or {}).get("__typename"),
+         "created_at": c["createdAt"], "body": c.get("body", "")}
+        for c in conn["nodes"]                               # ref: code_structure §4.7（作者已删则 author 为 null）
+    ]
+
+
+def update_discussion_comment(token, comment_id, body):
+    """原地覆盖评论正文；返回 {id, url}。
+
+    ref: plan §3 步骤1（updateDiscussionComment(input:{commentId,body})）
+    """
+    data = _graphql(token, _UPDATE_COMMENT_QUERY, {"input": {"commentId": comment_id, "body": body}})
+    return data["updateDiscussionComment"]["comment"]        # ref: plan §3 步骤1（comment{id,url}）
+
+
+def delete_discussion_comment(token, comment_id):
+    """删除评论；返回 deletedCommentId。
+
+    ref: plan §3 步骤1（deleteDiscussionComment(input:{id})）
+    """
+    data = _graphql(token, _DELETE_COMMENT_QUERY, {"input": {"id": comment_id}})
+    return data["deleteDiscussionComment"]["deletedCommentId"]   # ref: plan §3 步骤1（deletedCommentId）
 
 
 def _graphql(token, query, variables):

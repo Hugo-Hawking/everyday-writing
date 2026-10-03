@@ -194,6 +194,18 @@ def build_memory_messages(followup, post):
     ]
 
 
+def pick_bot_comments(comments, bot_author):
+    """从 comments 里挑出 bot 自己的评论，按 createdAt 倒序（最新在前）。
+
+    纯函数：不触网、不依赖返回顺序（comments 无 orderBy）。
+    ref: plan §8 R5（本地倒序，避免信任返回顺序取错「最新」）
+    ref: plan §8 R1/R2（仅按 login 精确过滤 → 人类评论永不被选中）
+    """
+    bots = [c for c in comments if c.get("login") == bot_author]
+    bots.sort(key=lambda c: c.get("created_at", ""), reverse=True)   # ISO8601 字典序==时间序
+    return bots
+
+
 def main():
     parser = argparse.ArgumentParser(description="为单篇文章生成 DeepSeek 评论（默认 dry-run，不写 GitHub）。")
     parser.add_argument("--path", required=True, help="文章 md 路径")        # ref: 裁定（--path 必填）
@@ -267,10 +279,26 @@ def main():
         discussion_id = discussion["id"]
         print("已创建 Discussion 标题=%r url=%s" % (post.slug, discussion["url"]))
     else:
-        print("命中已存在的 Discussion id=%s（追加评论）" % discussion_id)                 # ref: 裁定 #6（命中仍追加）
+        print("命中已存在的 Discussion id=%s（将更新既有评论）" % discussion_id)           # ref: plan §3 步骤2（命中→更新）
 
-    node = github_graphql.add_discussion_comment(token, discussion_id, comment)           # ref: 步骤 5：addDiscussionComment
-    print("已写入评论 url=%s" % node["url"])
+    # 评论落库策略：更新优先 → 缺失则新增 → 收敛历史 bot 重复条（人类评论永不触碰）。
+    # 识别 bot 评论只用 author.login，**不得用 viewerDidAuthor**——本机以 OAuth 身份查询 bot 评论时该字段
+    # 恒为 false（ref: plan §4 假设2，Discussion #8 2026-10-03 实测）。
+    # ref: plan §3 步骤2；code_structure §2.2
+    bot_comments = pick_bot_comments(
+        github_graphql.list_discussion_comments(token, discussion_id),
+        github_graphql.BOT_COMMENT_AUTHOR,
+    )
+    if bot_comments:
+        newest = bot_comments[0]                                                          # 倒序首条 = 最新
+        node = github_graphql.update_discussion_comment(token, newest["id"], comment)     # 原地覆盖（先更新）
+        print("已更新既有评论 id=%s url=%s" % (newest["id"], node["url"]))
+        for old in bot_comments[1:]:                                                      # 仅删更旧的 bot 重复条（后删除）
+            github_graphql.delete_discussion_comment(token, old["id"])
+            print("已删除 bot 重复评论 id=%s" % old["id"])
+    else:
+        node = github_graphql.add_discussion_comment(token, discussion_id, comment)       # 无 bot 评论 → 新增
+        print("已写入评论 url=%s" % node["url"])
 
     if followup:                                # ref: 步骤5：评论成功后幂等更新记忆文件（git 提交归步骤6）
         series.update_memory(
