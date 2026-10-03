@@ -17,7 +17,7 @@ GRAPHQL_URL = "https://api.github.com/graphql"     # ref: knowledge §3（GraphQ
 REQUEST_TIMEOUT = 60                               # ref: 网络边界：请求超时（秒）
 
 # bot 自身评论识别：GraphQL 里 bot 评论的 author.login（⚠️ 不用 viewerDidAuthor——对 bot 恒 false）
-# ref: plan §4 假设2（Discussion #8 实测 author.login=="github-actions"、viewerDidAuthor==false，2026-10-03）
+# ref: plan §4 假设4（Discussion #8 实测 author.login=="github-actions"、viewerDidAuthor==false，2026-10-03）
 BOT_COMMENT_AUTHOR = os.environ.get("BOT_COMMENT_AUTHOR", "github-actions")
 
 # 按标题找库：search(type:DISCUSSION)，取 nodes 内 Discussion 的 id/title/category
