@@ -77,6 +77,7 @@ Authorization: Bearer <GITHUB_PAT_with_repo_scope>
 | `tags` | ✖ | 字符串数组 | 缺省 `[]`；若提供则须为字符串数组（`jq` 校验，否则报错退出） |
 | `series` | ✖ | 系列 id（phase2）；须匹配 `^[a-z0-9-]+$`，且须对应已存在的 `src/content/series/<series>.md`（否则报错退出，不静默） | 缺省空 → 普通文章；配 `order` 写为系列章节，详见 §1.6 |
 | `order` | ✖ | 章节号（phase2）；须匹配 `^[0-9]+$`（非负整数）；**仅当提供 `series` 时可用** | 缺省空；提供 `series` 却缺 `order` → 报错退出 |
+| `essay` | ✖ | 随笔标记（phase3）；非空时只接受 `true`/`false`；**与 `series` 互斥**（`essay==true` 且 `series` 非空 → 报错退出） | 缺省空 → 非随笔；`essay=true` 写为随笔，详见 §1.7 |
 
 **另有两项前置校验**：
 - 目标文件 `src/content/posts/<date>_<slug>.md` **已存在 → 报错退出**（不覆盖已有文章）。
@@ -86,7 +87,7 @@ Authorization: Bearer <GITHUB_PAT_with_repo_scope>
 
 写入路径：**`src/content/posts/<date>_<slug>.md`**（如 `2026-10-02_my-post.md`）。
 
-frontmatter 字段与 `src/content.config.ts` 的 `posts` schema **严格一致**（`title`/`date`/`slug`/`description`/`tags` 五字段均必填；`series`/`order` 为 phase2 新增**可选**字段，见 §1.6），顺序固定：
+frontmatter 字段与 `src/content.config.ts` 的 `posts` schema **严格一致**（`title`/`date`/`slug`/`description`/`tags` 五字段均必填；`series`/`order` 为 phase2 新增**可选**字段，见 §1.6；`essay` 为 phase3 新增**可选**字段，见 §1.7），顺序固定：
 
 ```markdown
 ---
@@ -101,7 +102,8 @@ tags: <tags_yaml>
 ```
 
 - **系列章节**：在 `tags:` 之后、结尾 `---` 之前**追加**两行 `series: <series>` 与 `order: <order>`（二者已由 `Validate payload` 校验为 YAML 安全标量，无需转义）。
-- **非系列文章**（payload 未给 `series`）：frontmatter **逐字不变**（不回归 phase1）。
+- **随笔**（phase3）：在 `tags:` 之后、`series/order` 之前**追加**一行 `essay: true`（仅当 payload `essay == "true"`；已校验为 YAML 安全标量，无需转义）。
+- **非系列非随笔文章**（payload 未给 `series`/`essay`）：frontmatter **逐字不变**（不回归 phase1）。
 
 ### 1.4 提交与链式触发
 
@@ -158,6 +160,28 @@ gh api -X POST repos/Hugo-Hawking/everyday-writing/dispatches \
 ```
 
 > 前置条件：`src/content/series/demo-novel.md`（系列元数据）须已存在于仓库，否则本调用因规则 3 被拒。
+
+### 1.7 随笔：可选 `essay`（phase3）
+
+`new-post` payload 新增一个**可选**字段，用于发布**日常随笔**（字段语义与路由详见 §4.6）：
+
+| 字段 | 规则 | 校验失败行为 |
+|------|------|--------------|
+| `essay` | 非空时须为 `true` 或 `false`（字符串形式）；`essay == "true"` 时 `series` 须为空（**互斥**） | `::error::` + 退出 1（不静默） |
+
+- **缺省**（或 `essay: false`）→ 非随笔，frontmatter 不写该行（phase1/2 行为不变）。
+
+**带 essay 的 payload 示例**（发布一篇随笔）：
+
+```bash
+gh api -X POST repos/Hugo-Hawking/everyday-writing/dispatches \
+  -f event_type=new-post \
+  -f client_payload[title]="雨天的咖啡馆" \
+  -f client_payload[slug]="essay-rain" \
+  -f client_payload[date]="2026-10-03" \
+  -f client_payload[content]="随笔正文 markdown 内容" \
+  -f client_payload[essay]="true"
+```
 
 ---
 
@@ -365,6 +389,23 @@ query($owner: String!, $name: String!, $number: Int!) {
 - push 前 **`git pull --rebase origin main`** + 失败重试 ≤ 3 次（防非快进）。
 - 该 push 用 `GITHUB_TOKEN` → **不触发任何其它 workflow**（GitHub 防递归，见 §1.4）。
 - `concurrency.group` 由「按文章路径」改为**全局 `bot-review`**：同系列不同章并发会争同一记忆文件，全局串行消除该竞态（代价：不同文章不再并行）。
+
+### 4.6 随笔：内容字段、路由与「无追更」（phase3）
+
+> 本节对应 plan `2026-10-03_phase3_随笔板块` 步骤 1–5；实现落在站点仓库 `src/content.config.ts`、`src/pages/essays/index.astro`、`src/layouts/Base.astro`、`.github/workflows/publish.yml`。
+
+- **内容字段**：`posts` 集合新增可选布尔 `essay`（`src/content.config.ts`）。`essay: true` ⇔ 随笔（省略或 `false` = 非随笔）。
+  - 🔴 **必须 optional**：现文 `2026-10-02_hello-world.md` 无此字段；若设为必填，`astro build` 直接失败。
+- **路由**：
+
+  | 路由 | 页面 | 内容 |
+  |------|------|------|
+  | `/essays/` | `src/pages/essays/index.astro` | **随笔专列页**：按 `date` **倒序**列出全部 `essay: true` 的文章（同日以 `slug` 升序作稳定次级键），每项 = 标题 + 日期，链到 `/posts/<slug>/`；**无**「第 N 章」等序号字样 |
+  | `/posts/<slug>/` | `src/pages/posts/[...slug].astro` | **复用文章页**（URL 形态**不变**；随笔**不**新开 `/essays/<slug>/`）→ 四处一致性不变（§0），评论区正常 |
+
+- **首页**：`/everyday-writing/` **照旧列出全部文章（含随笔）**——`/essays/` 只是专列页，**不取代**首页（用户 2026-10-03 拍板，随笔不隐藏）。
+- **与系列的区别（无追更）**：随笔**无追更记忆**（不写 `data/series/**`）；随笔**不触发** bot 追更路径——bot **不读取** `essay` 字段，识别只靠「无 `series`」（`scripts/bot/review_post.py` 的 `if post.frontmatter.get("series"):` 分支）→ 走**普通读后感**路径（评论文结构与普通文章一致）。
+- **导航**：`src/layouts/Base.astro` 顶部新增全站导航：首页 / 系列 / 随笔。
 
 ---
 

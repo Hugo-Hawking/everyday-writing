@@ -6,6 +6,10 @@
 # 扩展（plan §3 步骤7 系列字段，2026-10-03）：payload 新增可选 `series`/`order`。
 #   有 series 则必须配整数 order，且 series 须对应已存在的 src/content/series/<id>.md（校验不静默）；
 #   二者均缺省时不写这两行 → 普通文章 frontmatter 逐字不变（不回归）。
+# 扩展（phase3 随笔字段，2026-10-03）：payload 新增可选 `essay`（只接受 true/false，与 `series` 互斥）。
+#   essay==true 时 frontmatter 在 tags 之后追加一行 `essay: true`；缺省（或 essay=false）时 frontmatter 逐字不变（不回归）。
+#   随笔仍落 src/content/posts/*.md → bot 无 series 自动走普通读后感路径（不碰 bot）。
+#   ref: reference/plans/2026-10-03_phase3_随笔板块/plan.md §3 步骤4 + code_structure.md §2.5
 #
 # ⚠️🔴 关于「push 应链式触发 deploy + bot-review」—— plan §3 步骤7 的假设是【错的】，勿改回去：
 #   GitHub 官方规定：**用仓库自带 GITHUB_TOKEN 完成的 push（或建 tag/release/PR），不会触发其它
@@ -78,6 +82,8 @@ jobs:
           # 系列字段（可选）：plan §3 步骤7。缺省为空 → 普通文章。
           SERIES: ${{ github.event.client_payload.series }}
           ORDER: ${{ github.event.client_payload.order }}
+          # 随笔字段（可选，phase3）：缺省为空 → 非随笔。ref: reference/plans/2026-10-03_phase3_随笔板块/plan.md §3 步骤4
+          ESSAY: ${{ github.event.client_payload.essay }}
         run: |
           set -euo pipefail
           # 按字符（而非字节）处理中文 description 首句截断。
@@ -158,6 +164,19 @@ jobs:
             exit 1
           fi
 
+          # 随笔字段（可选，phase3）：非空时只接受 true/false；且 essay==true 与 series 非空互斥（一篇不能既是随笔又是系列章节）。
+          # ref: reference/plans/2026-10-03_phase3_随笔板块/plan.md §3 步骤4 + code_structure.md §2.5（校验不静默）
+          if [ -n "$ESSAY" ]; then
+            if [ "$ESSAY" != "true" ] && [ "$ESSAY" != "false" ]; then
+              echo "::error::payload.essay 非法（只接受 true / false）：$ESSAY"
+              exit 1
+            fi
+            if [ "$ESSAY" = "true" ] && [ -n "$SERIES" ]; then
+              echo "::error::payload.essay 与 series 互斥（一篇不能既是随笔又是系列章节）"
+              exit 1
+            fi
+          fi
+
           # title/description 为任意用户串 → 按 YAML double-quoted 标量转义（\ → \\，\" → \\"，换行 → 空格）。
           yaml_escape() { local s="$1"; s="${s//\\/\\\\}"; s="${s//\"/\\\"}"; s="${s//$'\n'/ }"; printf '%s' "$s"; }
           TITLE_ESC="$(yaml_escape "$TITLE")"
@@ -174,6 +193,8 @@ jobs:
             # 系列字段经 $GITHUB_OUTPUT 传给下一步；即使为空也输出空串，下游据此判断是否写这两行。
             echo "series=$SERIES"
             echo "order=$ORDER"
+            # 随笔字段经 $GITHUB_OUTPUT 传给下一步；空串=未提供。ref: plan §3 步骤4
+            echo "essay=$ESSAY"
             echo "body<<__PUBLISH_BODY_EOF__"
             printf '%s\n' "$CONTENT"
             echo "__PUBLISH_BODY_EOF__"
@@ -194,6 +215,8 @@ jobs:
           # 系列字段（可选，取自 Validate payload 的 $GITHUB_OUTPUT）。
           SERIES: ${{ steps.payload.outputs.series }}
           ORDER: ${{ steps.payload.outputs.order }}
+          # 随笔字段（可选，取自 Validate payload 的 $GITHUB_OUTPUT）。
+          ESSAY: ${{ steps.payload.outputs.essay }}
           BODY: ${{ steps.payload.outputs.body }}
         run: |
           set -euo pipefail
@@ -204,6 +227,12 @@ jobs:
             echo "slug: $SLUG"
             echo "description: \"$DESCRIPTION_ESC\""
             echo "tags: $TAGS_YAML"
+            # 随笔在 tags 之后追加一行 essay: true（仅 ESSAY=="true" 时；位置在 series/order 之前）。
+            # 已校验为 true/false → YAML 安全标量，无需转义。
+            # ref: reference/plans/2026-10-03_phase3_随笔板块/plan.md §3 步骤4 + code_structure.md §2.5
+            if [ "$ESSAY" = "true" ]; then
+              echo "essay: true"
+            fi
             # 系列章节追加 series/order 两行（仅 SERIES 非空时；位置在 tags 之后、--- 之前）。
             # series 已在 Validate payload 校验为 ^[a-z0-9-]+$、order 校验为 ^[0-9]+$ → 均为 YAML 安全标量，无需转义。
             # ref: plan §3 步骤7 + §8 R9（接口层支持系列字段）

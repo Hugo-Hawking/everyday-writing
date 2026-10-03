@@ -18,6 +18,13 @@ const { title } = Astro.props;
     <header>
       <!-- BASE_URL 由 astro.config base 决定（trailingSlash='always' → '/everyday-writing/'）；ref: node_modules/astro/dist/core/create-vite.js:196 -->
       <a href={import.meta.env.BASE_URL}>everyday-writing</a>
+      <!-- 全站导航（phase3）：首页 / 系列 / 随笔。BASE_URL 以 '/' 结尾（trailingSlash='always'）→ 拼 'series/'、'essays/' 得正确绝对路径。
+           ref: reference/plans/2026-10-03_phase3_随笔板块/plan.md §3 步骤3 + code_structure.md §2.4 -->
+      <nav>
+        <a href={import.meta.env.BASE_URL}>首页</a>
+        <a href={`${import.meta.env.BASE_URL}series/`}>系列</a>
+        <a href={`${import.meta.env.BASE_URL}essays/`}>随笔</a>
+      </nav>
     </header>
     <main>
       <slot />

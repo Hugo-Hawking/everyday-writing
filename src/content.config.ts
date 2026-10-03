@@ -22,6 +22,11 @@ const posts = defineCollection({
     // ref: reference/plans/2026-10-03_phase2_系列小说板块/plan.md §3 步骤1 + §8 红队点 R1
     series: z.string().optional(), // 引用 src/content/series/<id>.md 的 id（= 文件名去扩展名）
     order: z.number().optional(), // 章节号；有 series 时必填（在 publish.yml/bot 侧校验，schema 不强绑）
+    // phase3：随笔标记；省略=非随笔。**必须 optional**——现文 hello-world 无此字段，设必填会让 astro build 失败。
+    // 语义：essay===true ⇔ 随笔；随笔复用 posts（bot 触达点 + 复用文章页/Giscus），不新开集合。
+    // ref: reference/plans/2026-10-03_phase3_随笔板块/plan.md §3 步骤1 + §8 红队点 R1
+    // ref: reference/plans/2026-10-03_phase3_随笔板块/code_structure.md §2.1
+    essay: z.boolean().optional(), // 随笔标记
   }),
 });
 

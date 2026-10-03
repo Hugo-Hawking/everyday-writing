@@ -1,0 +1,40 @@
+---
+// 随笔列表页：按 date 倒序列出全部随笔（frontmatter essay === true），供日常流水浏览。
+// ref: reference/plans/2026-10-03_phase3_随笔板块/plan.md §3 步骤2（/essays/ 倒序、只含随笔、空列表不报错、无序号字样）
+// ref: reference/plans/2026-10-03_phase3_随笔板块/code_structure.md §2.2（filter essay===true + sort 倒序 / slug 次级键）
+// ref: node_modules/astro/dist/content/runtime.d.ts:19（getCollection 返回 { id, data, ... }，无 slug 字段，slug 取自 frontmatter）
+// 写法照 src/pages/series/index.astro（Base 壳 + import.meta.env.BASE_URL 拼链 + 沿用 toISOString 显示口径）。
+import { getCollection } from 'astro:content';
+import Base from '../../layouts/Base.astro';
+
+// 随笔 = 显式 essay===true（严格布尔比较，非 truthy——避免把 essay:false 误当真）。
+// 倒序：date 降序；同日并列时以 slug 升序作稳定次级键（保证渲染顺序确定）。
+// 注（R5）：date 只写日期（YYYY-MM-DD）时同日多篇的先后无法表达——要同日有序请在 frontmatter 的
+//   date 里带时刻（如 2026-10-03T09:30:00）；显示沿用 toISOString().slice(0,10)，按 UTC 截取（已知限制，本 phase 不改）。
+// ref: plan §8 红队点 R3（过滤条件必须 === true）/ R5（同日排序须确定 + 时刻/UTC 限制）
+const posts = (await getCollection('posts'))
+  .filter((p) => p.data.essay === true)
+  .sort(
+    (a, b) =>
+      b.data.date.valueOf() - a.data.date.valueOf() ||
+      a.data.slug.localeCompare(b.data.slug),
+  );
+---
+<Base title="随笔">
+  <h1>随笔</h1>
+  {posts.length === 0 && <p>还没有随笔。</p>}
+  <ul>
+    {
+      posts.map((post) => (
+        <li>
+          <a href={`${import.meta.env.BASE_URL}posts/${post.data.slug}/`}>
+            {post.data.title}
+          </a>
+          <time datetime={post.data.date.toISOString()}>
+            {post.data.date.toISOString().slice(0, 10)}
+          </time>
+        </li>
+      ))
+    }
+  </ul>
+</Base>
