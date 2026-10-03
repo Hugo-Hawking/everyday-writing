@@ -4,8 +4,9 @@
 > **适用仓库**：`Hugo-Hawking/everyday-writing`
 > **站点**：`https://hugo-hawking.github.io`　**base**：`/everyday-writing/`
 > **文章 URL**：`https://hugo-hawking.github.io/everyday-writing/posts/<slug>/`
-> **本文档口径**：所有字段、规则、命令均**逐字对照站点仓库源码**（`.github/workflows/{publish,bot-review,deploy}.yml`、`scripts/bot/review_post.py`、`scripts/bot/lib/github_graphql.py`、`src/components/Giscus.astro`、`src/content.config.ts`）写成；源码变更时本文档须同步更新。
-> **phase1 实测**：2026-10-02 三条工作流已云端跑通（见文末「附：端到端实测记录」）。
+> **本文档口径**：所有字段、规则、命令均**逐字对照站点仓库源码**（`.github/workflows/{publish,bot-review,deploy}.yml`、`scripts/bot/{review_post.py,lib/github_graphql.py,lib/series.py}`、`src/components/Giscus.astro`、`src/content.config.ts`）写成；源码变更时本文档须同步更新。
+> **phase1 实测**：2026-10-02 三条工作流已云端跑通（见文末「附：端到端实测记录（2026-10-02）」）。
+> **phase2 实测**：2026-10-03 系列小说板块（`series`/`order` 字段 · `/series/` 路由 · 追更记忆）端到端冒烟通过（见文末「附：端到端实测记录（2026-10-03）」）。
 
 ---
 
@@ -74,6 +75,8 @@ Authorization: Bearer <GITHUB_PAT_with_repo_scope>
 | `content` | ✔ | 非空；文章正文 markdown | 无（缺 → 报错退出） |
 | `description` | ✖ | 任意字符串 | **空则取正文首句**：首个非空行 → 去行首 markdown 标记（`#`/`>`/`*`/`+`/`-`）→ 截到首个句末标点（`。！？.!?`） |
 | `tags` | ✖ | 字符串数组 | 缺省 `[]`；若提供则须为字符串数组（`jq` 校验，否则报错退出） |
+| `series` | ✖ | 系列 id（phase2）；须匹配 `^[a-z0-9-]+$`，且须对应已存在的 `src/content/series/<series>.md`（否则报错退出，不静默） | 缺省空 → 普通文章；配 `order` 写为系列章节，详见 §1.6 |
+| `order` | ✖ | 章节号（phase2）；须匹配 `^[0-9]+$`（非负整数）；**仅当提供 `series` 时可用** | 缺省空；提供 `series` 却缺 `order` → 报错退出 |
 
 **另有两项前置校验**：
 - 目标文件 `src/content/posts/<date>_<slug>.md` **已存在 → 报错退出**（不覆盖已有文章）。
@@ -83,7 +86,7 @@ Authorization: Bearer <GITHUB_PAT_with_repo_scope>
 
 写入路径：**`src/content/posts/<date>_<slug>.md`**（如 `2026-10-02_my-post.md`）。
 
-frontmatter 字段与 `src/content.config.ts` 的 `posts` schema **严格一致**（5 个字段均必填），顺序固定：
+frontmatter 字段与 `src/content.config.ts` 的 `posts` schema **严格一致**（`title`/`date`/`slug`/`description`/`tags` 五字段均必填；`series`/`order` 为 phase2 新增**可选**字段，见 §1.6），顺序固定：
 
 ```markdown
 ---
@@ -96,6 +99,9 @@ tags: <tags_yaml>
 
 <content 正文>
 ```
+
+- **系列章节**：在 `tags:` 之后、结尾 `---` 之前**追加**两行 `series: <series>` 与 `order: <order>`（二者已由 `Validate payload` 校验为 YAML 安全标量，无需转义）。
+- **非系列文章**（payload 未给 `series`）：frontmatter **逐字不变**（不回归 phase1）。
 
 ### 1.4 提交与链式触发
 
@@ -118,6 +124,40 @@ permissions:
   contents: write   # 写文章 md 并 git push
   actions: write    # gh workflow run 显式触发 deploy.yml / bot-review.yml
 ```
+
+### 1.6 系列章节：可选 `series`/`order`（phase2）
+
+`new-post` payload 新增两个**可选**字段，用于发布连载小说的章节（字段语义与路由详见 §4）：
+
+| 字段 | 规则 | 校验失败行为 |
+|------|------|--------------|
+| `series` | 系列 id；须匹配 `^[a-z0-9-]+$`；须对应已存在的 `src/content/series/<series>.md` | `::error::` + 退出 1（不静默） |
+| `order` | 章节号（字符串形式整数）；须匹配 `^[0-9]+$`；**提供 `series` 时必填** | `::error::` + 退出 1 |
+
+四条**联动校验规则**（`Validate payload` 步骤，`publish.yml`）：
+
+1. `series` 非空 → 须匹配 `^[a-z0-9-]+$`；
+2. `series` 非空 → `order` 须非空，且匹配 `^[0-9]+$`；
+3. `series` 非空 → `src/content/series/<series>.md` 须已存在，否则报错退出（指向不存在的系列元数据）；
+4. `series` 为空而 `order` 非空 → 报错退出（`order` 仅用于系列章节）。
+
+二者**均缺省** → 按普通文章处理，不写这两行（phase1 行为不变）。
+
+**带系列字段的 payload 示例**（把 `demo-novel` 系列第 2 章发上去）：
+
+```bash
+gh api -X POST repos/Hugo-Hawking/everyday-writing/dispatches \
+  -f event_type=new-post \
+  -f client_payload[title]="第二章 归途" \
+  -f client_payload[slug]="demo-novel-ch2" \
+  -f client_payload[date]="2026-10-03" \
+  -f client_payload[description]="第二章的一句话摘要" \
+  -f client_payload[series]="demo-novel" \
+  -f client_payload[order]="2" \
+  -f client_payload[content]="第二章正文 markdown 内容"
+```
+
+> 前置条件：`src/content/series/demo-novel.md`（系列元数据）须已存在于仓库，否则本调用因规则 3 被拒。
 
 ---
 
@@ -175,13 +215,15 @@ python scripts/bot/review_post.py --path <file> --commit
 
 ```yaml
 permissions:
-  contents: read     # checkout 读仓库（取变更文章 / 跑脚本）
+  contents: write    # phase2：bot 提交追更记忆文件 data/series/<id>.md 所需（原为 read，见 §4.5）
   discussions: write # bot 建 Discussion + 加评论所需；缺失会**静默 403**
 ```
 
 ### 2.4 事件去重
 
-`concurrency: { group: bot-review-${{ inputs.path || github.event.client_payload.path || github.ref }}, cancel-in-progress: false }`——防同一来源被并发触发时重复建库；但**不能**消除「先后两次触发」的重复评论。
+`concurrency: { group: bot-review, cancel-in-progress: false }`——防同一来源被并发触发时重复建库；但**不能**消除「先后两次触发」的重复评论。
+
+> **phase2 变更**：`group` 由「按文章路径」改为**全局 `bot-review`**——同系列不同章并发会争同一记忆文件（`data/series/<id>.md`），全局串行消除该竞态（代价：不同文章不再并行）。详见 §4.5。
 
 ---
 
@@ -264,12 +306,74 @@ query($owner: String!, $name: String!, $number: Int!) {
 
 ---
 
+## 4. 系列小说：内容字段、路由与追更记忆（phase2）
+
+> 本节对应 plan `2026-10-03_phase2_系列小说板块` 步骤 1–8；实现落在站点仓库 `src/content.config.ts`、`src/pages/{series/*,posts/[...slug]}.astro`、`scripts/bot/{review_post.py,lib/series.py}`、`.github/workflows/{publish,bot-review}.yml`。
+
+### 4.1 内容字段（`posts` frontmatter 扩展）
+
+`posts` 集合新增两个**可选**字段（`src/content.config.ts`）：
+
+| 字段 | 类型 | 必填 | 说明 |
+|------|------|:---:|------|
+| `series` | `string` | ✖ | 引用 `src/content/series/<id>.md` 的系列 id（= 文件名去扩展名） |
+| `order` | `number` | ✖ | 章节号；**有 `series` 时必填**（由 `publish.yml` / bot 侧校验，schema 不强绑） |
+
+- 🔴 **必须 optional**：现文 `2026-10-02_hello-world.md` 无此二字段；若设为必填，`astro build` 会直接失败（红队点 R1 已复现：设必填 → `InvalidContentEntryDataError`，改回 optional → 构建通过）。
+- **系列元数据集合** `series`（`src/content/series/*.md`）：schema `title`（必填）、`description?`、`status`（`'连载中'` / `'完结'`，默认 `'连载中'`）、`cover?`；条目 id = 文件名去扩展名（= `posts.series` 的取值域）。
+
+### 4.2 路由与页面
+
+| 路由 | 页面 | 内容 |
+|------|------|------|
+| `/series/` | `src/pages/series/index.astro` | **系列总览**：列出所有系列（书名 / 简介 / 状态 / 章节数），链到 `/series/<系列 id>/` |
+| `/series/<系列 id>/` | `src/pages/series/[slug].astro` | **目录页**：该系列全部章节，按 `order` **升序**排列，每章可点入 |
+| `/posts/<slug>/` | `src/pages/posts/[...slug].astro` | **章节页**（URL 形态**不变**）；系列章节额外渲染「← 上一章 / 目录 / 下一章 →」导航（同系列按 `order` 取前后章）；非系列文章**不渲染**该导航 |
+
+- 🔴 **四处一致性在新路由下不变**（见 §0）：`frontmatter slug` ＝ `/posts/<slug>/` ＝ giscus `data-term` ＝ Discussion 标题。giscus `data-term` 仍取自 `post.data.slug`，与 `/series/` 路由无关（系列页不挂 giscus）。
+- 站内链接一律带 `import.meta.env.BASE_URL`（base = `/everyday-writing/`）。
+
+### 4.3 追更记忆文件 `data/series/<系列 id>.md`
+
+- **由 bot 维护**（`scripts/bot/review_post.py` + `scripts/bot/lib/series.py`）；文件位于 `src/` 之外，**Astro 不构建它**、也不匹配 `bot-review.yml` 的 `paths`（写它不触发自评）。
+- **格式**：头部说明 + 每章一条 `## 第 N 章 <标题> (slug: <slug>)`，其下 `- 梗概：…` / `- 人物/伏笔：…`（后者可省）。
+
+```markdown
+# 追更记忆：<系列标题>
+
+> 本文件由 bot 维护，记录已读章节的梗概与线索；请勿手工改（会被下次评论覆盖）。
+## 第 1 章 <章标题> (slug: <slug>)
+- 梗概：…
+- 人物/伏笔：…
+```
+
+### 4.4 bot 追更行为（系列章）
+
+对 `frontmatter.series` 非空的章节，`review_post.py` 走**追更路径**（非系列文章走原路径，**不回归** phase1）：
+
+1. **两次 DeepSeek 调用**：第一次生成**评论**（发 Discussion，契约与普通文章一致——`> 🤖 DeepSeek 自动评论` + 三段结构）；第二次生成**该章记忆条目**（写入记忆文件）。第二次调用**先于**「发评论」执行——若失败则快速中止，避免「评论已发但记忆未写」的半完成态。
+2. **追更上下文** = 前情记忆（记忆文件中 `order < 当前` 的条目）+ 同系列**最近 K 章**原文（默认 **K = 10**，环境变量 `SERIES_CONTEXT_K` 覆盖）；前序原文总字符上限默认 **16000**（`SERIES_CONTEXT_CHAR_LIMIT` 覆盖），超限时**从更早的章丢弃**（至少保留最近 1 章）。
+3. **幂等**：记忆条目按 `order` / `slug` 去重，重评同章**替换**而不重复；落盘按 `order` 升序。
+4. **写盘时机**：`--commit` 才写评论 + 记忆文件；dry-run 与 `--show-context` **均不写**。
+
+### 4.5 记忆文件的提交
+
+记忆文件的 git 提交由 `bot-review.yml` 的 **`Commit series memory`** 步骤完成（排在 `Run bot` 之后）：
+
+- `permissions` 由 `contents: read` 提升为 **`contents: write`**（bot 提交记忆所需）。
+- **只 `git add data/series/`**（禁用 `git add -A` / `.`，缩小写权限的 blast radius）；无暂存变化则跳过（不产空 commit）。
+- push 前 **`git pull --rebase origin main`** + 失败重试 ≤ 3 次（防非快进）。
+- 该 push 用 `GITHUB_TOKEN` → **不触发任何其它 workflow**（GitHub 防递归，见 §1.4）。
+- `concurrency.group` 由「按文章路径」改为**全局 `bot-review`**：同系列不同章并发会争同一记忆文件，全局串行消除该竞态（代价：不同文章不再并行）。
+
+---
+
 ## 附：触发与权限汇总
 
 | 接口 | 事件类型 | Workflow | `permissions` | 触发凭据 |
 |------|----------|----------|---------------|----------|
 | new-post | `repository_dispatch` / `new-post` | `publish.yml` | `contents: write`, `actions: write` | 外部调用方 PAT（`repo` scope） |
-| review-post | `repository_dispatch` / `review-post` | `bot-review.yml` | `contents: read`, `discussions: write` | 外部调用方 PAT（`repo` scope） |
+| review-post | `repository_dispatch` / `review-post` | `bot-review.yml` | `contents: write`, `discussions: write` | 外部调用方 PAT（`repo` scope） |
 | review-post | `workflow_dispatch`（`inputs.path`） | `bot-review.yml` | 同上 | 有 repo 写权限者 / `gh workflow run` |
 | review-post | `push`（`src/content/posts/*.md`） | `bot-review.yml` | 同上 | 人工 push / PAT push |
 | （部署，非对外接口） | `push`（main） / `workflow_dispatch` | `deploy.yml` | `contents: read`, `pages: write`, `id-token: write` | — |
@@ -277,6 +381,7 @@ query($owner: String!, $name: String!, $number: Int!) {
 
 - 🔴 **`GITHUB_TOKEN` 只能触发 `workflow_dispatch` / `repository_dispatch`**，不能靠 push 链式触发别的 workflow（见 §1.4）。
 - 🔴 **外部调用 `repository_dispatch` 必须用带 `repo` scope 的 PAT**，Actions 内的 `GITHUB_TOKEN` 不能向本仓库发 dispatch 以启动另一条工作流。
+- **phase2 变更**：`bot-review.yml` 的 permissions 由 `contents: read` 提升为 **`contents: write`**——追更记忆文件（`data/series/<id>.md`）的提交需仓库写权限（见 §4.5）。
 
 ## 附：端到端实测记录（2026-10-02）
 
@@ -285,3 +390,11 @@ query($owner: String!, $name: String!, $number: Int!) {
 - **文章上线**：线上文章页 `https://hugo-hawking.github.io/everyday-writing/posts/e2e-smoke-test/` 返回 **HTTP 200**，页面 HTML 含 `data-term="e2e-smoke-test"`。
 - **评论落地**：Discussion **#2** 已建——标题 `e2e-smoke-test`、分类 `General`、1 条评论（作者 `github-actions`）。
 - **判定标准（plan §1）满足**：打开文章页可见正文 + bot 评论同屏；更早的 `hello-world` 闭环亦经用户**目视确认**评论在页面显示（plan 红队点 1 排除）。
+
+## 附：端到端实测记录（2026-10-03 · 系列小说板块）
+
+- **场景**：push 一部 3 章的 demo 系列（`demo-novel`：ch1 / ch2 / ch3）。
+- **Bot Review**：run `37110907914` 绿（约 30s）——为 3 章各建 Discussion（**#5 / #4 / #3**）并写入追更评论；`Commit series memory` 步骤第 1 次 `pull --rebase` + push **成功**，远端提交 `8a771b2` **仅改动 `data/series/demo-novel.md`**（提交面限制生效，§4.5）。
+- **Deploy**：run `37110907878` 绿（约 34s）；线上 `/series/`、`/series/demo-novel/`、`/posts/demo-novel-ch2/` 均返回 **HTTP 200**。
+- **防递归**：记忆文件的 push **未触发**任何新的 workflow run（`GITHUB_TOKEN` push 不触发，§1.4 假设成立）。
+- **路由与排序**：目录页章节顺序 ch1 → ch2 → ch3（按 `order` 升序，而三章的文件/日期顺序为反序，故排序确非按路径/日期）；章节页「上一章 / 目录 / 下一章」导航与 giscus `data-term`（= 章节 slug）均正确。
