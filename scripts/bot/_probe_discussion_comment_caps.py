@@ -32,7 +32,7 @@ def call(query, variables):
 UPDATE = """mutation($input: UpdateDiscussionCommentInput!){
   updateDiscussionComment(input:$input){ comment{ id url } } }"""
 DELETE = """mutation($input: DeleteDiscussionCommentInput!){
-  deleteDiscussionComment(input:$input){ deletedCommentId } }"""
+  deleteDiscussionComment(input:$input){ comment{ id } } }"""
 ADD = """mutation($input: AddDiscussionCommentInput!){
   addDiscussionComment(input:$input){ comment{ id author{ login } } } }"""
 
