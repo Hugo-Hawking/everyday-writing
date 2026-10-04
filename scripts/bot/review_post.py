@@ -261,7 +261,7 @@ def _is_essay(post):
     """随笔判定：**必须字符串比较**——md_parse 把 frontmatter 值都读成字符串，
     `essay: false` 会得到真值 `"false"`（非空字符串 → 真），直接 `if ...get("essay")` 会误判。
     ref: plan §8 红队点 R1；code_structure §2.2 / §4.1
-    ref: knowledge [[2026-10-03_站点前端实现与系列扩展点]] §11（phase3 R2）
+    ref: lib/md_parse.py:94（frontmatter 值均按字符串解析）；knowledge [[2026-10-02_bot脚本与DeepSeek接口]] §2.9
     """
     return str(post.frontmatter.get("essay", "")).strip().lower() == "true"
 
