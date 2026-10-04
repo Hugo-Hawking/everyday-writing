@@ -12,6 +12,10 @@
 dry-run/--show-context 均不写记忆文件；--commit 才写（git 提交由 workflow 完成，见 plan 步骤 6）。
 非系列文章走原有路径（不回归）。
 
+随笔（frontmatter `essay: true`）：走「创作伙伴」路径，**单次调用**——system=ESSAY_SYSTEM_PROMPT，
+  输出三段（读后感想 / 关键素材 / 构思灵感）作一条公开评论发 Discussion；不追更、不落任何文件。
+ref: reference/plans/2026-10-04_phase6_随笔评论重塑/plan.md §3 步骤1
+
 ref: reference/plans/2026-10-02_phase1_端到端闭环/plan.md §3 步骤 5
 ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §1/§2/§3/§4
 ref: reference/plans/2026-10-03_phase2_系列小说板块/plan.md §3 步骤 5
@@ -51,6 +55,23 @@ SYSTEM_PROMPT = (
     "## 可以改进的地方\n"
     "- （具体、可操作的建议，1-3 条）\n\n"
     "要求：必须引用原文中的具体词句；改进建议要具体可操作；不要空泛的客套鼓励。"
+)
+
+# 随笔路径 system prompt：把 bot 定位为「创作伙伴」而非读者点评——给感想 + 抽可复用素材 + 衍生写作灵感。
+# ref: plan §1 目标（用户 2026-10-04 拍板：全公开评论 + 构思自由发挥）
+# ref: code_structure §2.1
+ESSAY_SYSTEM_PROMPT = (
+    "你是「everyday-writing」写作网站的 AI 创作伙伴（不是读者点评者）。你会看到一篇作者写的**随笔**。\n"
+    "请替作者做三件事，并严格按以下 Markdown 结构输出：\n\n"
+    "> 🤖 DeepSeek 自动评论\n\n"
+    "## 读后感想\n"
+    "（这篇随笔给人的整体感受与它触及的东西，2-4 句）\n\n"
+    "## 关键素材\n"
+    "- （从随笔里抽取**可供日后写作复用**的关键素材：意象、观察、金句、情境、细节、可延展的母题…… 2-5 条）\n\n"
+    "## 构思灵感\n"
+    "- （由这篇随笔衍生出的写作灵感：小说设定、人物互动、日常桥段等，自由发挥，2-4 条）\n\n"
+    "要求：必须引用随笔中的具体词句或意象；不得臆造随笔未涉及的事实；「读后感想」≤ 4 句，"
+    "「关键素材」≤ 5 条、「构思灵感」≤ 4 条，每条 ≤ 60 字（防输出过长被截断）。"
 )
 
 # 追更路径（第一次调用）system prompt：追更读者角色 + 前情记忆；输出**就是评论文本本体**，
@@ -178,14 +199,16 @@ def _print_dry_run(post, followup, comment, digest_lines, comment_messages, memo
     print("===== [dry-run] 结束：未调用 GitHub GraphQL、未写记忆文件 =====")
 
 
-def build_messages(post):
+def build_messages(post, system=SYSTEM_PROMPT):
     """组 DeepSeek messages：system 角色设定 + user 文章内容。
 
+    `system` 可覆盖：随笔路径传 ESSAY_SYSTEM_PROMPT；默认 SYSTEM_PROMPT（普通文章，不回归）。
     ref: knowledge/architecture §4（prompt 设计要点）
+    ref: plan §3 步骤1 / code_structure §2.3（随笔复用本函数，system 换随笔 prompt）
     """
     user_content = "文章标题：%s\n\n文章正文：\n%s" % (post.frontmatter.get("title", ""), post.body)   # ref: 正文喂给模型
     return [
-        {"role": "system", "content": SYSTEM_PROMPT},
+        {"role": "system", "content": system},
         {"role": "user", "content": user_content},
     ]
 
@@ -234,6 +257,15 @@ def pick_bot_comments(comments, bot_author):
     return [c for c in comments if c.get("login") == bot_author]
 
 
+def _is_essay(post):
+    """随笔判定：**必须字符串比较**——md_parse 把 frontmatter 值都读成字符串，
+    `essay: false` 会得到真值 `"false"`（非空字符串 → 真），直接 `if ...get("essay")` 会误判。
+    ref: plan §8 红队点 R1；code_structure §2.2 / §4.1
+    ref: knowledge [[2026-10-03_站点前端实现与系列扩展点]] §11（phase3 R2）
+    """
+    return str(post.frontmatter.get("essay", "")).strip().lower() == "true"
+
+
 def main():
     parser = argparse.ArgumentParser(description="为单篇文章生成 DeepSeek 评论（默认 dry-run，不写 GitHub）。")
     parser.add_argument("--path", required=True, help="文章 md 路径")        # ref: 裁定（--path 必填）
@@ -270,6 +302,8 @@ def main():
             _die(str(err))
         comment_messages = build_followup_messages(followup, post)
         memory_messages = build_memory_messages(followup, post)   # ref: 步骤5：记忆条目走二次调用
+    elif _is_essay(post):                        # 【phase6】随笔：创作伙伴三段，单次调用（followup 保持 None）
+        comment_messages = build_messages(post, system=ESSAY_SYSTEM_PROMPT)   # ref: plan §3 步骤1（series 优先，R2）
     else:
         comment_messages = build_messages(post)  # ref: 非系列不回归
 
