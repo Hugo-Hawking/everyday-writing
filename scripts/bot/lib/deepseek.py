@@ -5,6 +5,7 @@ ref: reference/plans/2026-10-02_phase1_端到端闭环/code_structure.md §3（D
 """
 
 import json
+import os
 import sys
 import time
 import urllib.error
@@ -23,6 +24,10 @@ REQUEST_TIMEOUT = 60
 # 429/5xx/超时 的退避间隔（秒），≤2 次
 # ref: RULES §8（429/5xx/超时 → 退避重试 ≤2 次后放弃并记录原始响应）
 RETRY_DELAYS = [2, 4]
+
+# prompt 预算（字符）：超限不发请求（phase5 plan §3 步骤2；RULES §12.6 快速失败）
+# ref: plan §4 假设1/2（64K token 窗口、~0.7 token/字符）→ 60000 字符 ≈ 42k token，留余量
+PROMPT_CHAR_BUDGET = int(os.environ.get("DEEPSEEK_PROMPT_CHAR_BUDGET", "60000"))
 
 
 def chat(api_key, messages):
@@ -68,6 +73,17 @@ def chat(api_key, messages):
                 attempt += 1
                 continue
             _die("DeepSeek 网络错误/超时，退避重试 %d 次仍失败" % len(RETRY_DELAYS), repr(err))
+
+
+def guard(messages, label):
+    """估算 prompt 字符总量，超预算即快速失败（不发起请求）。
+
+    ref: plan §3 步骤2；plan §8 R7（评论/记忆两次调用各调一次）
+    """
+    total = sum(len(m.get("content", "")) for m in messages)
+    if total > PROMPT_CHAR_BUDGET:
+        _die("提示词超预算（%s）：%d 字符 > 上限 %d（可调 DEEPSEEK_PROMPT_CHAR_BUDGET）"
+             % (label, total, PROMPT_CHAR_BUDGET), "")     # ref: _die(msg, raw) 需二参；此处无原始响应
 
 
 def _error_message(code):

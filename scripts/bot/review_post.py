@@ -72,18 +72,20 @@ FOLLOWUP_SYSTEM_PROMPT = (
     "要求：必须引用原文中的具体词句；不得臆造；不要空泛的客套鼓励。"
 )
 
-# 记忆路径（第二次调用）system prompt：只产出**当前章**的记忆条目正文（供 update_memory 落盘），
-# 不产出评论、不含 Markdown 标题、不含解释。
-# ref: plan §3 步骤5（记忆条目来源 = 二次调用，主 Agent 2026-10-03 裁定）
-# ref: code_structure §6（记忆条目格式：- 梗概 / - 人物·伏笔）
+# 记忆路径（第二次调用）system prompt：产出**两块**——`【全书脉络】`（滚动重写的长期摘要）
+# 与 `【本章条目】`（当前章逐章条目），供 update_memory 落盘。不产出评论、不含解释。
+# ref: plan §3 步骤2（记忆调用两块输出）；code_structure §2.3
 MEMORY_SYSTEM_PROMPT = (
-    "你是「everyday-writing」写作网站的追更记忆整理器。你会看到某部连载小说的前情记忆、"
-    "此前章节原文，以及**当前这一章**正文。\n"
-    "请只为**当前这一章**生成追更记忆条目正文，供系统存档（不对外展示）。严格按以下格式输出，"
-    "不要输出评论、不要 Markdown 标题、不要任何解释：\n\n"
-    "- 梗概：（本章 1-3 句剧情梗概）\n"
-    "- 人物/伏笔：（本章新增或推进的人物与伏笔；若无，省略此行）\n\n"
-    "要求：只依据前文与当前章实际出现的内容，不得臆造；梗概须抓住本章关键情节。"
+    "你是「everyday-writing」写作网站的追更记忆整理器。你会看到该系列的【全书脉络】、【最近章节条目】、"
+    "此前章节原文，以及当前这一章正文。\n"
+    "请输出两块，严格按标记，不要输出评论、不要解释：\n\n"
+    "【全书脉络】\n"
+    "（把上一版【全书脉络】与最近章节条目、当前章合并，重写为一份长期摘要：主要人物、核心设定、未回收伏笔。"
+    "目标 ≤ 800 字，宁可精炼，不要罗列每章情节。）\n\n"
+    "【本章条目】\n"
+    "- 梗概：（当前章 1-3 句剧情梗概）\n"
+    "- 人物/伏笔：（当前章新增或推进的人物与伏笔；若无，省略此行）\n\n"
+    "要求：只依据给定内容，不得臆造。"
 )
 
 
@@ -96,6 +98,25 @@ def _normalize_digest_lines(digest):
             continue
         lines.append(ln if ln.startswith("-") else "- " + ln)
     return lines
+
+
+def split_memory_output(raw):
+    """把记忆调用输出拆为 `(canon_text, digest_lines)`。按【全书脉络】/【本章条目】标记。
+
+    缺【本章条目】→ `digest_lines=[]`；缺【全书脉络】→ `canon_text=""`（交由 `--commit` 守卫快速失败）。
+    ref: plan §3 步骤2；plan §8 红队点 R4（格式漂移 → 快速失败，不静默写坏记忆）
+    """
+    canon, entry = "", ""
+    if "【本章条目】" in raw:
+        head, entry = raw.split("【本章条目】", 1)
+        canon = head.split("【全书脉络】", 1)[1] if "【全书脉络】" in head else ""
+    digest_lines = _normalize_digest_lines(entry)
+    return canon.strip(), digest_lines
+
+
+def _prompt_chars(messages):
+    """messages 的字符总量估算（与 `deepseek.guard` 同口径）；供 --show-context/dry-run 核对。"""
+    return sum(len(m.get("content", "")) for m in messages) if messages else 0
 
 
 def _print_context(post, followup, comment_messages, memory_messages):
@@ -111,7 +132,12 @@ def _print_context(post, followup, comment_messages, memory_messages):
         print("前序章节命中数 : %d" % s["prior_hit"])
         print("纳入章数       : %d（K=%d，上限 %d 字符）" % (s["included"], followup["k"], followup["char_limit"]))
         print("因长度丢弃章数 : %d" % s["dropped"])
-        print("记忆条目数     : %d（order<当前）" % s["memory_used"])
+        print("纳入记忆       : %d 条 / %d 字符（M=%d，上限 %d）"
+              % (s["memory_used"], s["memory_chars"], followup["memory_k"], followup["memory_char_limit"]))
+        print("记忆因上限丢弃 : %d 条" % s["memory_dropped"])
+        print("canon 长度     : %d 字符" % s["canon_len"])
+        print("prompt 总字符  : 评论 %d / 记忆 %d"
+              % (_prompt_chars(comment_messages), _prompt_chars(memory_messages)))
         print("记忆文件       : %s" % followup["memory_path"])
         print("===== [show-context] 评论用 messages（第一次调用）=====")
     else:
@@ -127,7 +153,7 @@ def _print_context(post, followup, comment_messages, memory_messages):
     print("===== [show-context] 结束（未调用模型、未写任何文件）=====")
 
 
-def _print_dry_run(post, followup, comment, digest_lines):
+def _print_dry_run(post, followup, comment, digest_lines, comment_messages, memory_messages):
     """dry-run 打印：追更上下文摘要（若有）+ 评论文本 + 记忆条目预览（不落盘）。"""
     if followup:
         s = followup["stats"]
@@ -137,7 +163,12 @@ def _print_dry_run(post, followup, comment, digest_lines):
         print("前序章节命中数 : %d" % s["prior_hit"])
         print("纳入章数       : %d（K=%d，上限 %d 字符）" % (s["included"], followup["k"], followup["char_limit"]))
         print("因长度丢弃章数 : %d" % s["dropped"])
-        print("记忆条目数     : %d（order<当前）" % s["memory_used"])
+        print("纳入记忆       : %d 条 / %d 字符（M=%d，上限 %d）"
+              % (s["memory_used"], s["memory_chars"], followup["memory_k"], followup["memory_char_limit"]))
+        print("记忆因上限丢弃 : %d 条" % s["memory_dropped"])
+        print("canon 长度     : %d 字符" % s["canon_len"])
+        print("prompt 总字符  : 评论 %d / 记忆 %d"
+              % (_prompt_chars(comment_messages), _prompt_chars(memory_messages)))
         print("===================================")
     print("===== [dry-run] 文章 slug=%r 的评论 =====" % post.slug)
     print(comment)
@@ -220,6 +251,9 @@ def main():
     # 追更上下文的 K 与字符上限（plan §3 步骤5：K 默认 10 可配置；上限防红队点 R4）
     k = args.context_k if args.context_k is not None else int(os.environ.get("SERIES_CONTEXT_K", series.DEFAULT_K))
     char_limit = int(os.environ.get("SERIES_CONTEXT_CHAR_LIMIT", series.DEFAULT_CHAR_LIMIT))
+    # 追更**记忆块**双上限（phase5 plan §3 步骤2：条数 M + 条目总字符；env 可覆盖）
+    memory_k = int(os.environ.get("SERIES_MEMORY_K", series.DEFAULT_MEMORY_K))
+    memory_char_limit = int(os.environ.get("SERIES_MEMORY_CHAR_LIMIT", series.DEFAULT_MEMORY_CHAR_LIMIT))
 
     try:
         post = parse_post(args.path)            # ref: 步骤 5 数据流向：md → frontmatter+body+slug
@@ -230,7 +264,8 @@ def main():
     memory_messages = None
     if post.frontmatter.get("series"):          # ref: 步骤5：系列章节走追更路径，否则原路径（不回归）
         try:
-            followup = series.prepare_followup(post, args.path, k, char_limit)
+            followup = series.prepare_followup(post, args.path, k, char_limit,
+                                               memory_k, memory_char_limit)   # ref: 步骤2 记忆块双上限透传
         except ValueError as err:               # ref: 步骤5 关键坑（缺/非法 order 显式报错）
             _die(str(err))
         comment_messages = build_followup_messages(followup, post)
@@ -246,22 +281,25 @@ def main():
     if not api_key:
         _die("未设置环境变量 DEEPSEEK_API_KEY，无法调用 DeepSeek（请先 export 或配 Actions Secret）")   # ref: RULES §8
 
+    deepseek.guard(comment_messages, "评论调用")             # 预算护栏（plan §8 R7；不发起请求）
     comment = deepseek.chat(api_key, comment_messages)   # 第一次调用：追更评论正文（ref: 步骤5）
 
     digest_lines = None
+    canon_text = ""
     if followup:
-        # 第二次调用：生成当前章记忆条目正文。**先于「发评论」生成**——生成失败时 deepseek.chat 内部
+        # 第二次调用：生成当前章记忆 + 全书脉络。**先于「发评论」生成**——生成失败时 deepseek.chat 内部
         # 直接退出（sys.exit），从而避免「评论已发但记忆失败」的半完成态（主 Agent 2026-10-03 裁定，
         # notes「设计短注 §5」决策1）。故此处位于 add_discussion_comment 之前。
+        deepseek.guard(memory_messages, "记忆调用")              # 第二条调用同样守卫（与评论同源 → 一起挡，R7）
         raw_digest = deepseek.chat(api_key, memory_messages)     # ref: 步骤5（记忆=二次调用）
-        digest_lines = _normalize_digest_lines(raw_digest)       # ref: 复用规整（- 起头的行列表）
+        canon_text, digest_lines = split_memory_output(raw_digest)   # ref: 两块解析（canon + 本章条目）
 
     if not args.commit:                         # ref: 裁定 #5（dry-run 短路，不碰 GraphQL/记忆文件）
-        _print_dry_run(post, followup, comment, digest_lines)
+        _print_dry_run(post, followup, comment, digest_lines, comment_messages, memory_messages)
         return
 
-    if followup and not digest_lines:           # ref: RULES §12.6（--commit 缺记忆条目快速失败，不静默降级）
-        _die("系列章节记忆条目为空，已中止：--commit 需非空记忆条目才能更新记忆文件")
+    if followup and not (digest_lines and canon_text):   # ref: RULES §12.6（--commit 缺记忆/canon 快速失败，不静默降级）
+        _die("系列章节记忆条目/canon 为空，已中止：--commit 需二者非空")
 
     token = os.environ.get("GITHUB_TOKEN")      # ref: RULES §1.5（Actions 内自动 token）
     if not token:
@@ -300,7 +338,8 @@ def main():
     if followup:                                # ref: 步骤5：评论成功后幂等更新记忆文件（git 提交归步骤6）
         series.update_memory(
             followup["repo_root"], followup["series_id"], followup["order"],
-            post.frontmatter.get("title", ""), post.slug, digest_lines)   # ref: 二次调用产出的条目行
+            post.frontmatter.get("title", ""), post.slug, digest_lines,
+            canon_text, followup["memory_k"])   # ref: 步骤2（传 canon + M；canon 非空才滚动）
         print("已更新追更记忆文件 %s" % followup["memory_path"])
 
 
