@@ -146,6 +146,8 @@ jobs:
           DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TARGETS: ${{ steps.targets.outputs.files }}
+          # 🔴 临时（phase5 步骤5 冒烟）：验证滚动丢弃 E2E。验证后立即删除本行。
+          SERIES_MEMORY_K: '2'
         run: |
           set -euo pipefail
           count=0
